@@ -47,6 +47,39 @@ let message = BrokerMessage::new(payload, Some("user_123".to_string()));
 println!("Message ID: {}", message.task_id);
 ```
 
+## InternalBrokerMessage
+
+Internal message representation used by broker implementations. Most users interact with `BrokerMessage<T>` instead.
+
+```rust
+pub struct InternalBrokerMessage {
+    pub task_id: String,
+    pub payload: String,
+    pub attempts: u8,
+    pub disambiguator: Option<String>,
+}
+```
+
+<ParamField path="task_id" type="String">
+  Unique identifier for the message
+</ParamField>
+
+<ParamField path="payload" type="String">
+  The serialized message content as JSON
+</ParamField>
+
+<ParamField path="attempts" type="u8">
+  Number of processing attempts made
+</ParamField>
+
+<ParamField path="disambiguator" type="Option<String>">
+  Optional disambiguator for fairness queues
+</ParamField>
+
+<Note>
+This type is primarily used internally by broker implementations. When implementing a custom broker, you'll work with this type to handle serialized messages.
+</Note>
+
 ## PublishOptions
 
 Options for publishing messages to the broker.
