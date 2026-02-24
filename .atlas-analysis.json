@@ -1,0 +1,119 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Broccoli",
+  "projectDescription": "A robust message queue system for Rust applications, designed as a Rust alternative to Celery.",
+  "theme": "aspen",
+  "primaryColor": "#4a9d5f",
+  "lightColor": "#6fb37f",
+  "darkColor": "#357a47",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/brokers",
+              "concepts/messages",
+              "concepts/error-handling"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/publishing",
+              "guides/consuming",
+              "guides/retry-strategies",
+              "guides/message-scheduling",
+              "guides/fairness-queues",
+              "guides/batch-operations"
+            ]
+          },
+          {
+            "group": "Brokers",
+            "pages": [
+              "brokers/redis",
+              "brokers/rabbitmq",
+              "brokers/surrealdb"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/management-api",
+              "advanced/concurrency",
+              "advanced/performance"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/basic-producer",
+              "examples/basic-consumer",
+              "examples/advanced-patterns"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api/broccoli-queue",
+              "api/broker-trait",
+              "api/types",
+              "api/errors"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Asynchronous message processing with Tokio",
+    "Multiple broker support (Redis, RabbitMQ, SurrealDB)",
+    "Configurable retry strategies with automatic failure handling",
+    "Connection pooling for high performance",
+    "Type-safe message handling with Serde",
+    "Flexible message processing patterns with concurrency control",
+    "Message scheduling and delayed execution",
+    "Fairness queues with disambiguators",
+    "Batch publishing and consuming operations",
+    "Management API for queue monitoring"
+  ],
+  "publicApiSurface": [
+    "BroccoliQueue::builder()",
+    "BroccoliQueue::publish()",
+    "BroccoliQueue::publish_batch()",
+    "BroccoliQueue::consume()",
+    "BroccoliQueue::consume_batch()",
+    "BroccoliQueue::try_consume()",
+    "BroccoliQueue::try_consume_batch()",
+    "BroccoliQueue::acknowledge()",
+    "BroccoliQueue::reject()",
+    "BroccoliQueue::cancel()",
+    "BroccoliQueue::process_messages()",
+    "BroccoliQueue::process_messages_with_handlers()",
+    "BroccoliQueue::size()",
+    "BroccoliQueue::queue_status()",
+    "RetryStrategy",
+    "ConsumeOptions",
+    "PublishOptions",
+    "BrokerMessage",
+    "BrokerConfig",
+    "BrokerTrait",
+    "BroccoliError"
+  ]
+}
