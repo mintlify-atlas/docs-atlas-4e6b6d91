@@ -1,0 +1,187 @@
+---
+title: Architecture
+description: Learn about Broccoli's system architecture and how its components work together
+---
+
+Broccoli is a message broker abstraction library that provides a unified interface for working with different message queue backends. The architecture consists of three main layers: the queue interface, the broker abstraction, and the broker implementations.
+
+## System overview
+
+The Broccoli architecture follows a layered design that separates concerns and allows you to switch between different message brokers without changing your application code.
+
+```
+┌─────────────────────────────────────┐
+│      BroccoliQueue (Public API)     │
+├─────────────────────────────────────┤
+│     Broker Trait (Abstraction)      │
+├─────────────────────────────────────┤
+│  Redis │ RabbitMQ │ SurrealDB       │
+│ Implementation │ Implementation     │
+└─────────────────────────────────────┘
+```
+
+## Core layers
+
+### Queue layer
+
+The `BroccoliQueue` struct is the main entry point for your application. It provides high-level methods for publishing, consuming, and processing messages.
+
+```rust
+pub struct BroccoliQueue {
+    broker: Arc<Box<dyn Broker>>,
+}
+```
+
+This layer handles:
+- Message serialization and deserialization
+- Retry logic coordination
+- Concurrency management
+- Error handling and recovery
+
+### Broker abstraction layer
+
+The `Broker` trait defines the interface that all broker implementations must follow. This abstraction allows you to write code once and run it on any supported backend.
+
+```rust
+#[async_trait::async_trait]
+pub trait Broker: Send + Sync {
+    async fn connect(&mut self, broker_url: &str) -> Result<(), BroccoliError>;
+    async fn publish(
+        &self,
+        queue_name: &str,
+        disambiguator: Option<String>,
+        message: &[InternalBrokerMessage],
+        options: Option<PublishOptions>,
+    ) -> Result<Vec<InternalBrokerMessage>, BroccoliError>;
+    async fn consume(
+        &self,
+        queue_name: &str,
+        options: Option<ConsumeOptions>,
+    ) -> Result<InternalBrokerMessage, BroccoliError>;
+    async fn acknowledge(
+        &self,
+        queue_name: &str,
+        message: InternalBrokerMessage,
+    ) -> Result<(), BroccoliError>;
+    async fn reject(
+        &self,
+        queue_name: &str,
+        message: InternalBrokerMessage,
+    ) -> Result<(), BroccoliError>;
+    // ... more methods
+}
+```
+
+### Implementation layer
+
+Each broker implementation (`RedisBroker`, `RabbitMQBroker`, `SurrealDBBroker`) handles the specifics of connecting to and interacting with its respective backend.
+
+Broker selection happens automatically based on the URL scheme:
+- `redis://` → Redis
+- `amqp://` → RabbitMQ  
+- `ws://` or `mem://` → SurrealDB
+
+## Connection management
+
+The `connect_to_broker` function analyzes your broker URL and instantiates the appropriate implementation:
+
+```rust
+pub async fn connect_to_broker(
+    broker_url: &str,
+    config: Option<BrokerConfig>,
+) -> Result<Box<dyn Broker>, BroccoliError>
+```
+
+Connections are pooled and managed by the underlying broker implementation. You can configure the pool size using `BrokerConfig`:
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(10)
+    .build()
+    .await?;
+```
+
+## Message flow
+
+When you publish a message, it flows through the system like this:
+
+1. Your application calls `queue.publish()`
+2. `BroccoliQueue` wraps your data in a `BrokerMessage<T>`
+3. The message is serialized to `InternalBrokerMessage`
+4. The broker implementation sends it to the backend
+5. The backend stores the message in a queue
+
+When consuming:
+
+1. Your application calls `queue.consume()`
+2. The broker implementation fetches from the backend
+3. The raw message is converted to `InternalBrokerMessage`
+4. `BroccoliQueue` deserializes it to `BrokerMessage<T>`
+5. Your application receives the typed message
+
+## Queue types
+
+Broccoli supports two queue patterns:
+
+### Standard queues
+
+Messages are processed in order by any available consumer:
+
+```rust
+queue.publish("tasks", None, &task, None).await?;
+```
+
+### Fairness queues
+
+Messages are grouped by a disambiguator, ensuring messages with the same disambiguator are processed sequentially:
+
+```rust
+queue.publish("tasks", Some(user_id), &task, None).await?;
+```
+
+This is useful when you need to maintain ordering guarantees for messages related to the same entity.
+
+## Error handling
+
+All operations return `Result<T, BroccoliError>`. The error types are categorized by operation:
+- `BroccoliError::Broker` - Connection and broker-level errors
+- `BroccoliError::Publish` - Publishing failures
+- `BroccoliError::Consume` - Consumption failures
+- `BroccoliError::Acknowledge` - Acknowledgment failures
+- `BroccoliError::Reject` - Rejection failures
+
+See the [Error Handling](/concepts/error-handling) guide for more details.
+
+## Configuration
+
+You configure Broccoli behavior through the builder pattern:
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(
+        RetryStrategy::new()
+            .with_attempts(5)
+            .retry_failed(true)
+    )
+    .pool_connections(20)
+    .enable_scheduling(true)
+    .build()
+    .await?;
+```
+
+Configuration options include:
+- Retry attempts for failed messages
+- Connection pool size
+- Message scheduling support
+- Auto-acknowledgment behavior
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Brokers" icon="server" href="/concepts/brokers">
+    Learn about the broker abstraction
+  </Card>
+  <Card title="Messages" icon="envelope" href="/concepts/messages">
+    Understand message structure
+  </Card>
+</CardGroup>

@@ -1,0 +1,442 @@
+---
+title: Advanced patterns
+description: Learn advanced usage patterns for Broccoli queue including delayed messages, priorities, fairness queues, and error handling
+---
+
+This guide covers advanced patterns for building robust message queue systems with Broccoli. You'll learn how to implement delayed messages, priority queues, fairness scheduling, and sophisticated error handling.
+
+## Delayed and scheduled messages
+
+You can delay message processing or schedule messages for a specific time using `PublishOptions`.
+
+### Delay messages
+
+Delay a message by a specific duration:
+
+```rust
+use broccoli_queue::queue::PublishOptions;
+use time::Duration;
+
+let options = PublishOptions {
+    delay: Some(Duration::seconds(60)),
+    scheduled_at: None,
+    ttl: None,
+    priority: None,
+};
+
+queue
+    .publish("jobs", None, &message, Some(options))
+    .await?;
+```
+
+### Schedule messages
+
+Schedule a message for a specific time:
+
+```rust
+use time::OffsetDateTime;
+
+let scheduled_time = OffsetDateTime::now_utc() + time::Duration::hours(2);
+
+let options = PublishOptions {
+    delay: None,
+    scheduled_at: Some(scheduled_time),
+    ttl: None,
+    priority: None,
+};
+
+queue
+    .publish("jobs", None, &message, Some(options))
+    .await?;
+```
+
+<Note>
+For RabbitMQ, you need to install the [delayed-exchange plugin](https://www.rabbitmq.com/blog/2015/04/16/scheduling-messages-with-rabbitmq) to use scheduling features.
+</Note>
+
+## Priority queues
+
+Priority queues allow you to process high-priority messages before low-priority ones. Priorities range from 1 (highest) to 5 (lowest).
+
+```rust
+let high_priority = PublishOptions {
+    delay: None,
+    scheduled_at: None,
+    ttl: None,
+    priority: Some(1),
+};
+
+let low_priority = PublishOptions {
+    delay: None,
+    scheduled_at: None,
+    ttl: None,
+    priority: Some(5),
+};
+
+// High-priority message will be processed first
+queue.publish("jobs", None, &urgent_job, Some(high_priority)).await?;
+queue.publish("jobs", None, &regular_job, Some(low_priority)).await?;
+```
+
+## Message TTL (time-to-live)
+
+Set an expiration time for messages to prevent stale jobs from being processed:
+
+```rust
+use time::Duration;
+
+let options = PublishOptions {
+    delay: None,
+    scheduled_at: None,
+    ttl: Some(Duration::hours(1)),
+    priority: None,
+};
+
+queue
+    .publish("jobs", None, &message, Some(options))
+    .await?;
+```
+
+Messages that exceed their TTL are automatically removed from the queue.
+
+## Fairness queues (Redis only)
+
+Fairness queues ensure that messages from different sources are processed fairly, preventing one source from monopolizing the queue.
+
+### Publishing to fairness queues
+
+```rust
+// Publish messages with different keys
+queue.publish("jobs", Some("customer-1".to_string()), &job1, None).await?;
+queue.publish("jobs", Some("customer-2".to_string()), &job2, None).await?;
+queue.publish("jobs", Some("customer-1".to_string()), &job3, None).await?;
+```
+
+### Consuming from fairness queues
+
+```rust
+use broccoli_queue::queue::ConsumeOptionsBuilder;
+
+let options = ConsumeOptionsBuilder::new()
+    .fairness(true)
+    .build();
+
+queue
+    .process_messages("jobs", Some(4), Some(options), |msg| async move {
+        process_job(msg.payload).await
+    })
+    .await?;
+```
+
+With fairness enabled, the queue alternates between different keys to ensure fair processing.
+
+## Advanced consume options
+
+Customize message consumption behavior using `ConsumeOptions`.
+
+### Auto-acknowledgment
+
+Automatically acknowledge messages before processing:
+
+```rust
+let options = ConsumeOptionsBuilder::new()
+    .auto_ack(true)
+    .build();
+
+queue
+    .process_messages("jobs", Some(4), Some(options), |msg| async move {
+        // Message is already acknowledged
+        process_job(msg.payload).await
+    })
+    .await?;
+```
+
+<Note>
+With auto-acknowledgment enabled, messages cannot be manually acknowledged or rejected. Use this only when message loss is acceptable.
+</Note>
+
+### Manual acknowledgment control
+
+Disable automatic acknowledgment after handler execution:
+
+```rust
+let options = ConsumeOptionsBuilder::new()
+    .handler_ack(false)
+    .build();
+
+queue
+    .process_messages("jobs", Some(4), Some(options), |msg| async move {
+        // Start processing but don't acknowledge yet
+        tokio::spawn(async move {
+            // Long-running task
+            heavy_processing(msg.payload).await;
+            // Acknowledge later in separate process
+        });
+        Ok(())
+    })
+    .await?;
+```
+
+This pattern is useful for spawning long-running tasks or delegating acknowledgment to separate processes.
+
+## Retry strategies
+
+Configure how failed messages are retried:
+
+```rust
+use broccoli_queue::queue::RetryStrategy;
+
+let retry_strategy = RetryStrategy::new()
+    .with_attempts(5)
+    .retry_failed(true);
+
+let queue = BroccoliQueue::builder("redis://localhost:6380")
+    .failed_message_retry_strategy(retry_strategy)
+    .pool_connections(5)
+    .build()
+    .await?;
+```
+
+### Disable retries
+
+Move failed messages directly to the failed queue:
+
+```rust
+let no_retry = RetryStrategy::new()
+    .retry_failed(false);
+
+let queue = BroccoliQueue::builder("redis://localhost:6380")
+    .failed_message_retry_strategy(no_retry)
+    .build()
+    .await?;
+```
+
+## Batch operations
+
+Batch operations improve performance when handling multiple messages.
+
+### Batch publishing
+
+```rust
+let jobs: Vec<JobPayload> = (1..=100)
+    .map(|i| JobPayload {
+        id: format!("job-{}", i),
+        task_name: "process_data".to_string(),
+        parameters: Parameters {
+            input_data: format!("data-{}", i),
+            priority: 1,
+            timeout_seconds: 300,
+        },
+        created_at: chrono::Utc::now(),
+    })
+    .collect();
+
+let published = queue
+    .publish_batch("jobs", None, jobs, None)
+    .await?;
+
+println!("Published {} jobs in one batch", published.len());
+```
+
+## Concurrent processing
+
+Control the level of concurrency for message processing:
+
+```rust
+// Process up to 10 messages concurrently
+queue
+    .process_messages("jobs", Some(10), None, |msg| async move {
+        process_job(msg.payload).await
+    })
+    .await?;
+
+// Unlimited concurrency
+queue
+    .process_messages("jobs", None, None, |msg| async move {
+        process_job(msg.payload).await
+    })
+    .await?;
+```
+
+<Note>
+Be careful with unlimited concurrency. It can overwhelm your system resources if messages arrive faster than they can be processed.
+</Note>
+
+## Error handling patterns
+
+### Selective retry logic
+
+Implement custom retry logic based on error types:
+
+```rust
+async fn error_handler(
+    msg: JobPayload,
+    err: BroccoliError,
+) -> Result<(), BroccoliError> {
+    match &err {
+        BroccoliError::Network(_) => {
+            eprintln!("Network error, will retry: {}", err);
+            // Message will be retried automatically
+        }
+        BroccoliError::InvalidPayload(_) => {
+            eprintln!("Invalid payload, moving to failed queue: {}", err);
+            // Message will move to failed queue
+        }
+        _ => {
+            eprintln!("Unknown error: {}", err);
+        }
+    }
+    Ok(())
+}
+
+queue
+    .process_messages_with_handlers(
+        "jobs",
+        Some(5),
+        None,
+        |msg| async move { process_job(msg.payload).await },
+        |msg, _| async { Ok(()) },
+        |msg, err| async { error_handler(msg.payload, err).await },
+    )
+    .await?;
+```
+
+### Dead letter queue monitoring
+
+Monitor and reprocess failed messages:
+
+```rust
+#[cfg(feature = "management")]
+{
+    use broccoli_queue::brokers::management::BrokerWithManagement;
+
+    // Get queue statistics
+    let stats = queue.queue_status("jobs").await?;
+    println!("Failed messages: {}", stats.failed_count);
+
+    // Requeue failed messages
+    let requeued = queue.requeue_failed("jobs", Some(10)).await?;
+    println!("Requeued {} failed messages", requeued);
+}
+```
+
+## Complete advanced example
+
+Here's a complete example combining multiple advanced patterns:
+
+```rust
+use broccoli_queue::{
+    error::BroccoliError,
+    queue::{BroccoliQueue, ConsumeOptionsBuilder, PublishOptions, RetryStrategy},
+};
+use serde::{Deserialize, Serialize};
+use time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+    priority: u8,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Configure retry strategy
+    let retry_strategy = RetryStrategy::new()
+        .with_attempts(5)
+        .retry_failed(true);
+
+    // Initialize queue
+    let queue = BroccoliQueue::builder("redis://localhost:6380")
+        .failed_message_retry_strategy(retry_strategy)
+        .pool_connections(10)
+        .build()
+        .await?;
+
+    // Publish with priorities and delays
+    let urgent_job = JobPayload {
+        id: "urgent-1".to_string(),
+        task_name: "urgent_processing".to_string(),
+        priority: 1,
+    };
+
+    let regular_job = JobPayload {
+        id: "regular-1".to_string(),
+        task_name: "regular_processing".to_string(),
+        priority: 3,
+    };
+
+    let delayed_job = JobPayload {
+        id: "delayed-1".to_string(),
+        task_name: "scheduled_processing".to_string(),
+        priority: 2,
+    };
+
+    queue.publish(
+        "jobs",
+        None,
+        &urgent_job,
+        Some(PublishOptions {
+            priority: Some(1),
+            ..Default::default()
+        }),
+    ).await?;
+
+    queue.publish(
+        "jobs",
+        None,
+        &regular_job,
+        Some(PublishOptions {
+            priority: Some(3),
+            ttl: Some(Duration::hours(1)),
+            ..Default::default()
+        }),
+    ).await?;
+
+    queue.publish(
+        "jobs",
+        None,
+        &delayed_job,
+        Some(PublishOptions {
+            delay: Some(Duration::minutes(5)),
+            priority: Some(2),
+            ..Default::default()
+        }),
+    ).await?;
+
+    // Process with custom options
+    let consume_options = ConsumeOptionsBuilder::new()
+        .auto_ack(false)
+        .handler_ack(true)
+        .build();
+
+    queue
+        .process_messages_with_handlers(
+            "jobs",
+            Some(10),
+            Some(consume_options),
+            |msg| async move {
+                println!("Processing: {:?}", msg.payload);
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                Ok(())
+            },
+            |msg, _| async move {
+                println!("Success: {}", msg.payload.id);
+                Ok(())
+            },
+            |msg, err| async move {
+                eprintln!("Failed: {} - {}", msg.payload.id, err);
+                Ok(())
+            },
+        )
+        .await?;
+
+    Ok(())
+}
+```
+
+## Next steps
+
+- Explore [publish options](/guides/publishing) and [consume options](/guides/consuming)
+- Learn about [Redis](/brokers/redis), [RabbitMQ](/brokers/rabbitmq), and [SurrealDB](/brokers/surrealdb) brokers
+- Set up [monitoring with the management API](/advanced/management-api)

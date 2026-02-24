@@ -1,0 +1,398 @@
+---
+title: Batch operations
+description: Efficiently publish and consume multiple messages at once with batch operations
+---
+
+Batch operations allow you to publish and consume multiple messages in a single operation, significantly improving throughput and reducing overhead.
+
+## Batch publishing
+
+Publish multiple messages at once with `publish_batch`:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+}
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .build()
+    .await?;
+
+let jobs = vec![
+    JobPayload { id: "job-1".to_string(), task_name: "process_data".to_string() },
+    JobPayload { id: "job-2".to_string(), task_name: "generate_report".to_string() },
+    JobPayload { id: "job-3".to_string(), task_name: "send_email".to_string() },
+];
+
+let messages = queue.publish_batch("jobs", None, jobs, None).await?;
+println!("Published {} messages", messages.len());
+```
+
+## Batch publishing with options
+
+Apply the same options to all messages in a batch:
+
+```rust
+use broccoli_queue::queue::PublishOptions;
+use time::Duration;
+
+let options = PublishOptions::builder()
+    .priority(1)
+    .ttl(Duration::hours(24))
+    .build();
+
+let messages = queue.publish_batch(
+    "jobs",
+    None,
+    jobs,
+    Some(options), // Applied to all messages
+).await?;
+```
+
+## Batch consuming
+
+Consume multiple messages at once:
+
+<CodeGroup>
+
+```rust Blocking batch consume
+use time::Duration;
+
+// Wait up to 5 seconds to collect 10 messages
+let messages = queue.consume_batch::<JobPayload>(
+    "jobs",
+    10,                      // batch size
+    Duration::seconds(5),    // timeout
+    None,
+).await?;
+
+println!("Consumed {} messages", messages.len());
+
+for message in messages {
+    // Process message
+    process(&message.payload).await?;
+    queue.acknowledge("jobs", message).await?;
+}
+```
+
+```rust Non-blocking batch consume
+// Try to get up to 10 messages, return immediately
+let messages = queue.try_consume_batch::<JobPayload>(
+    "jobs",
+    10,    // batch size
+    None,
+).await?;
+
+if messages.is_empty() {
+    println!("No messages available");
+} else {
+    println!("Got {} messages", messages.len());
+}
+```
+
+</CodeGroup>
+
+<Note>
+`consume_batch` waits for messages up to the timeout, while `try_consume_batch` returns immediately with whatever is available.
+</Note>
+
+## Batch size considerations
+
+Choose appropriate batch sizes based on your use case:
+
+| Batch size | Use case | Trade-offs |
+|------------|----------|------------|
+| 1-10 | Low latency required | Higher overhead, immediate processing |
+| 10-100 | Balanced throughput | Good for most use cases |
+| 100-1000 | High throughput | Lower overhead, higher latency |
+| 1000+ | Bulk processing | Maximum throughput, potential memory issues |
+
+## Example: Batch processor
+
+Here's a complete example of batch publishing and consuming:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use serde::{Serialize, Deserialize};
+use time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DataRecord {
+    id: String,
+    value: f64,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(10)
+        .build()
+        .await?;
+    
+    // Generate batch of records
+    let records: Vec<DataRecord> = (1..=100)
+        .map(|i| DataRecord {
+            id: format!("record-{}", i),
+            value: i as f64 * 1.5,
+        })
+        .collect();
+    
+    // Publish in batches
+    println!("Publishing {} records...", records.len());
+    queue.publish_batch("data_processing", None, records, None).await?;
+    
+    // Consume in batches
+    loop {
+        let messages = queue.try_consume_batch::<DataRecord>(
+            "data_processing",
+            10, // Process 10 at a time
+            None,
+        ).await?;
+        
+        if messages.is_empty() {
+            break;
+        }
+        
+        println!("Processing batch of {} messages", messages.len());
+        
+        // Process all messages in batch
+        for message in messages {
+            println!("Processing: {}", message.payload.id);
+            // Your processing logic
+            queue.acknowledge("data_processing", message).await?;
+        }
+    }
+    
+    println!("All messages processed");
+    Ok(())
+}
+```
+
+## Batch publishing with disambiguators
+
+All messages in a batch share the same disambiguator:
+
+```rust
+let user_jobs = vec![job1, job2, job3];
+
+queue.publish_batch(
+    "jobs",
+    Some("user-123".to_string()),
+    user_jobs,
+    None,
+).await?;
+```
+
+For different disambiguators, publish separate batches:
+
+```rust
+for (user_id, user_jobs) in jobs_by_user {
+    queue.publish_batch(
+        "jobs",
+        Some(user_id),
+        user_jobs,
+        None,
+    ).await?;
+}
+```
+
+## Batching with delayed messages
+
+Schedule entire batches:
+
+```rust
+use broccoli_queue::queue::PublishOptions;
+use time::Duration;
+
+let options = PublishOptions::builder()
+    .delay(Duration::minutes(5))
+    .build();
+
+let messages = queue.publish_batch(
+    "scheduled_jobs",
+    None,
+    jobs,
+    Some(options),
+).await?;
+
+println!("Scheduled {} jobs for 5 minutes from now", messages.len());
+```
+
+## Error handling in batches
+
+Handle partial failures when processing batches:
+
+```rust
+let messages = queue.consume_batch::<JobPayload>(
+    "jobs",
+    10,
+    Duration::seconds(5),
+    None,
+).await?;
+
+for message in messages {
+    match process(&message.payload).await {
+        Ok(_) => {
+            queue.acknowledge("jobs", message).await?;
+        }
+        Err(e) => {
+            eprintln!("Failed to process {}: {}", message.task_id, e);
+            queue.reject("jobs", message).await?;
+        }
+    }
+}
+```
+
+<Warning>
+Each message in a batch must be acknowledged or rejected individually. There is no bulk acknowledgment.
+</Warning>
+
+## Performance optimization
+
+<Steps>
+
+### Use connection pooling
+
+Increase pool size for batch operations:
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(20) // More connections for parallel batches
+    .build()
+    .await?;
+```
+
+### Tune batch sizes
+
+Test different batch sizes for your workload:
+
+```rust
+let batch_sizes = vec![10, 50, 100, 500];
+
+for batch_size in batch_sizes {
+    let start = std::time::Instant::now();
+    
+    let messages = queue.consume_batch::<JobPayload>(
+        "jobs",
+        batch_size,
+        Duration::seconds(1),
+        None,
+    ).await?;
+    
+    let duration = start.elapsed();
+    println!("Batch size {}: {:?}", batch_size, duration);
+}
+```
+
+### Parallel batch processing
+
+Process multiple batches concurrently:
+
+```rust
+use tokio::task;
+
+let mut handles = vec![];
+
+for _ in 0..5 {
+    let queue = queue.clone();
+    let handle = task::spawn(async move {
+        loop {
+            let messages = queue.try_consume_batch::<JobPayload>(
+                "jobs",
+                10,
+                None,
+            ).await?;
+            
+            if messages.is_empty() {
+                break;
+            }
+            
+            for message in messages {
+                // Process
+                queue.acknowledge("jobs", message).await?;
+            }
+        }
+        Ok::<_, Box<dyn std::error::Error>>(())
+    });
+    
+    handles.push(handle);
+}
+
+for handle in handles {
+    handle.await??;
+}
+```
+
+</Steps>
+
+## Batch monitoring
+
+Track batch operation metrics:
+
+```rust
+let batch_size = 100;
+let start = std::time::Instant::now();
+
+let messages = queue.publish_batch("jobs", None, jobs, None).await?;
+
+let duration = start.elapsed();
+let throughput = messages.len() as f64 / duration.as_secs_f64();
+
+println!("Published {} messages in {:?}", messages.len(), duration);
+println!("Throughput: {:.2} messages/second", throughput);
+```
+
+## Best practices
+
+<AccordionGroup>
+
+<Accordion title="Choose appropriate batch sizes">
+- Start with batch sizes of 10-100
+- Monitor memory usage with large batches
+- Adjust based on message size and processing time
+</Accordion>
+
+<Accordion title="Handle timeouts gracefully">
+```rust
+let messages = queue.consume_batch::<JobPayload>(
+    "jobs",
+    100,
+    Duration::seconds(5),
+    None,
+).await?;
+
+if messages.len() < 100 {
+    println!("Timeout: got only {} messages", messages.len());
+}
+```
+</Accordion>
+
+<Accordion title="Use batching for bulk imports">
+```rust
+// Instead of publishing one by one
+for record in records {
+    queue.publish("jobs", None, &record, None).await?; // Slow!
+}
+
+// Use batch publishing
+queue.publish_batch("jobs", None, records, None).await?; // Fast!
+```
+</Accordion>
+
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Publishing messages" icon="paper-plane" href="/guides/publishing">
+    Learn about single message publishing
+  </Card>
+  <Card title="Consuming messages" icon="inbox" href="/guides/consuming">
+    Explore consumption patterns
+  </Card>
+</CardGroup>

@@ -1,0 +1,283 @@
+---
+title: "Redis broker"
+description: "Set up and use Redis as a message broker for Broccoli"
+---
+
+<Info>
+  **Prerequisites**:
+  - Redis server (version 5.0 or higher)
+  - Rust project with Broccoli configured
+</Info>
+
+Redis is the default broker for Broccoli, offering high performance and low latency for message queuing. It uses sorted sets for priority queues and supports scheduled message delivery.
+
+## Enable the Redis feature
+
+Add Broccoli to your `Cargo.toml` with the Redis feature enabled:
+
+```toml Cargo.toml
+[dependencies]
+broccoli_queue = { version = "0.4", features = ["redis"] }
+```
+
+<Note>
+  Redis is enabled by default. If you're using other features, explicitly include `"redis"` in the features array.
+</Note>
+
+## Connect to Redis
+
+Create a queue instance with a Redis connection URL:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(10)
+        .build()
+        .await?;
+
+    Ok(())
+}
+```
+
+## Connection options
+
+The Redis broker supports standard Redis connection URLs with the following formats:
+
+```rust
+// Local Redis
+"redis://localhost:6379"
+
+// Redis with authentication
+"redis://:password@localhost:6379"
+
+// Redis with username and password
+"redis://username:password@localhost:6379"
+
+// Redis with database selection
+"redis://localhost:6379/2"
+
+// Redis with TLS
+"rediss://localhost:6380"
+```
+
+## Configuration
+
+Customize the Redis broker behavior using the queue builder:
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(20)           // Connection pool size (default: 10)
+    .retry_attempts(5)              // Max retry attempts (default: 3)
+    .retry_failed(true)             // Retry failed messages (default: true)
+    .enable_scheduling(true)        // Enable delayed/scheduled messages
+    .build()
+    .await?;
+```
+
+## Publish messages
+
+<Steps>
+<Step title="Basic publishing">
+
+Publish a message to a queue:
+
+```rust
+use serde::{Serialize, Deserialize};
+use broccoli_queue::queue::BroccoliQueue;
+
+#[derive(Serialize, Deserialize)]
+struct Task {
+    id: String,
+    data: String,
+}
+
+let task = Task {
+    id: "task-1".to_string(),
+    data: "process this".to_string(),
+};
+
+queue.publish("tasks", None, task, None).await?;
+```
+
+</Step>
+
+<Step title="Priority messages">
+
+Set message priority (1-5, where 1 is highest):
+
+```rust
+use broccoli_queue::queue::PublishOptions;
+
+queue.publish(
+    "tasks",
+    None,
+    task,
+    Some(PublishOptions {
+        priority: Some(1),  // High priority
+        ..Default::default()
+    })
+).await?;
+```
+
+</Step>
+
+<Step title="Delayed messages">
+
+Schedule messages for future delivery:
+
+```rust
+use time::Duration;
+use broccoli_queue::queue::PublishOptions;
+
+// Delay by 60 seconds
+queue.publish(
+    "tasks",
+    None,
+    task,
+    Some(PublishOptions {
+        delay: Some(Duration::seconds(60)),
+        ..Default::default()
+    })
+).await?;
+```
+
+<Warning>
+  Delayed messages require `enable_scheduling(true)` in the queue configuration.
+</Warning>
+
+</Step>
+
+<Step title="Message TTL">
+
+Set a time-to-live for messages:
+
+```rust
+queue.publish(
+    "tasks",
+    None,
+    task,
+    Some(PublishOptions {
+        ttl: Some(Duration::hours(1)),  // Expire after 1 hour
+        ..Default::default()
+    })
+).await?;
+```
+
+</Step>
+</Steps>
+
+## Consume messages
+
+Process messages from a queue:
+
+```rust
+queue.process_messages(
+    "tasks",
+    Some(4),  // Number of concurrent workers
+    None,
+    |msg| async move {
+        // Process the message
+        let task: Task = msg.payload;
+        println!("Processing task: {}", task.id);
+        Ok(())
+    }
+).await?;
+```
+
+## Fairness queues
+
+Redis broker supports fairness queues with round-robin consumption across disambiguators:
+
+```rust
+// Publish to different tenants
+queue.publish("tasks", Some("tenant-a".to_string()), task_a, None).await?;
+queue.publish("tasks", Some("tenant-b".to_string()), task_b, None).await?;
+
+// Consumers automatically balance across tenants
+queue.process_messages("tasks", Some(4), None, |msg| async move {
+    // Messages are consumed fairly from all tenants
+    Ok(())
+}).await?;
+```
+
+## Failed message handling
+
+Messages that fail processing are automatically retried based on your configuration:
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .retry_attempts(3)    // Retry up to 3 times
+    .retry_failed(true)   // Enable retry
+    .build()
+    .await?;
+```
+
+Failed messages that exceed retry attempts are moved to a `{queue_name}_failed` queue:
+
+```rust
+// Check failed messages
+let sizes = queue.size("tasks").await?;
+if let Some(failed_count) = sizes.get("tasks_failed") {
+    println!("Failed messages: {}", failed_count);
+}
+```
+
+## Data structures
+
+The Redis broker uses these data structures:
+
+- **Sorted sets**: Queue storage with priority and timestamp sorting
+- **Hashes**: Message payload and metadata storage
+- **Lists**: Processing queue tracking
+- **Sets**: Fairness tracking for round-robin consumption
+
+## Limitations
+
+<Warning>
+  - Maximum message size is limited by Redis string limits (512 MB)
+  - Priority values must be between 1 and 5
+  - Scheduled messages require additional memory for delayed storage
+  - Connection pool size affects memory usage and connection overhead
+</Warning>
+
+## Management API
+
+Enable the management feature for queue inspection:
+
+```toml Cargo.toml
+[dependencies]
+broccoli_queue = { version = "0.4", features = ["redis", "management"] }
+```
+
+Check queue sizes:
+
+```rust
+let sizes = queue.size("tasks").await?;
+for (queue_name, size) in sizes {
+    println!("{}: {} messages", queue_name, size);
+}
+```
+
+## Performance considerations
+
+- **Connection pooling**: Increase `pool_connections` for high-throughput applications
+- **Batch publishing**: Use `publish_batch` to reduce network roundtrips
+- **Redis persistence**: Configure Redis AOF or RDB for durability
+- **Memory management**: Monitor Redis memory usage with large message volumes
+
+## Next steps
+
+<CardGroup cols={2}>
+
+<Card title="RabbitMQ broker" icon="rabbit" href="/brokers/rabbitmq">
+  Use RabbitMQ for advanced routing and clustering
+</Card>
+
+<Card title="SurrealDB broker" icon="database" href="/brokers/surrealdb">
+  Use SurrealDB for integrated storage and queuing
+</Card>
+
+</CardGroup>

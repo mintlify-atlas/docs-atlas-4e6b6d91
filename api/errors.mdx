@@ -1,0 +1,375 @@
+---
+title: Errors
+description: Error types for the Broccoli message queue system
+---
+
+Broccoli uses the `BroccoliError` enum to represent all possible errors that can occur within the system. All errors implement the standard `Error` trait using `thiserror`.
+
+## BroccoliError
+
+```rust
+pub enum BroccoliError {
+    Broker(String),
+    BrokerNonIdempotentOp(String),
+    BrokerNonIdempotentRetriableOp(String),
+    Publish(String),
+    Consume(String),
+    Acknowledge(String),
+    Reject(String),
+    Cancel(String),
+    GetMessagePosition(String),
+    Serialization(serde_json::Error),
+    #[cfg(feature = "redis")]
+    Redis(redis::RedisError),
+    #[cfg(feature = "surrealdb")]
+    SurrealDB(surrealdb::Error),
+    Job(String),
+    QueueStatus(String),
+    ConnectionTimeout(u32),
+    NotImplemented,
+}
+```
+
+## Error variants
+
+### Broker
+
+```rust
+Broker(String)
+```
+
+Represents errors that occur during broker operations.
+
+**Examples:**
+- Connection failures
+- Pool initialization errors
+- General broker configuration issues
+
+```rust
+match queue.publish("jobs", None, &payload, None).await {
+    Ok(message) => println!("Published: {}", message.task_id),
+    Err(BroccoliError::Broker(msg)) => eprintln!("Broker error: {}", msg),
+    Err(e) => eprintln!("Other error: {:?}", e),
+}
+```
+
+### BrokerNonIdempotentOp
+
+```rust
+BrokerNonIdempotentOp(String)
+```
+
+Errors that occur during broker implementations related to concurrent operations not being idempotent. This can only happen when doing multiple parallel SurrealDB reads.
+
+**Examples:**
+- Multiple concurrent reads on the same topic
+
+```rust
+if let Err(BroccoliError::BrokerNonIdempotentOp(msg)) = result {
+    log::error!("Non-idempotent operation detected: {}", msg);
+}
+```
+
+### BrokerNonIdempotentRetriableOp
+
+```rust
+BrokerNonIdempotentRetriableOp(String)
+```
+
+Errors that occur during broker implementations related to concurrent operations not being idempotent. The operation can be retried. This can only happen when doing multiple SurrealDB operations on the same table.
+
+**Examples:**
+- Multiple concurrent writes on the same table
+
+```rust
+if let Err(BroccoliError::BrokerNonIdempotentRetriableOp(msg)) = result {
+    log::warn!("Retriable operation failed: {}, retrying...", msg);
+    // Retry logic here
+}
+```
+
+### Publish
+
+```rust
+Publish(String)
+```
+
+Represents errors that occur during message publishing.
+
+**Examples:**
+- Failed to send message to broker
+- Message serialization errors during publish
+
+```rust
+let result = queue.publish("jobs", None, &payload, None).await;
+if let Err(BroccoliError::Publish(msg)) = result {
+    eprintln!("Failed to publish: {}", msg);
+}
+```
+
+### Consume
+
+```rust
+Consume(String)
+```
+
+Represents errors that occur during message consumption.
+
+**Examples:**
+- Failed to retrieve message from broker
+- Message deserialization errors
+
+```rust
+let result = queue.consume::<JobPayload>("jobs", None).await;
+if let Err(BroccoliError::Consume(msg)) = result {
+    eprintln!("Failed to consume: {}", msg);
+}
+```
+
+### Acknowledge
+
+```rust
+Acknowledge(String)
+```
+
+Represents errors that occur during message acknowledgment.
+
+**Examples:**
+- Failed to acknowledge message processing
+- Failed to remove message from processing queue
+- Attempting to acknowledge an auto-acknowledged message
+
+```rust
+let message = queue.consume::<JobPayload>("jobs", None).await?;
+if let Err(BroccoliError::Acknowledge(msg)) = queue.acknowledge("jobs", message).await {
+    eprintln!("Failed to acknowledge: {}", msg);
+}
+```
+
+### Reject
+
+```rust
+Reject(String)
+```
+
+Represents errors that occur during message rejection.
+
+**Examples:**
+- Failed to reject message processing
+- Failed to move message to failed queue
+- Attempting to reject an auto-acknowledged message
+
+```rust
+let message = queue.consume::<JobPayload>("jobs", None).await?;
+if processing_failed {
+    queue.reject("jobs", message).await?;
+}
+```
+
+### Cancel
+
+```rust
+Cancel(String)
+```
+
+Represents errors that occur during message canceling.
+
+**Examples:**
+- Failed to cancel message processing
+- Failed to delete message from queue
+- Message ID not found
+
+```rust
+if let Err(BroccoliError::Cancel(msg)) = queue.cancel("jobs", message_id).await {
+    eprintln!("Failed to cancel message: {}", msg);
+}
+```
+
+### GetMessagePosition
+
+```rust
+GetMessagePosition(String)
+```
+
+Represents errors that occur during getting a message's position in the queue.
+
+**Examples:**
+- Failed to retrieve message position
+- Message not found in queue
+
+### Serialization
+
+```rust
+Serialization(serde_json::Error)
+```
+
+Represents errors that occur during message serialization or deserialization. This variant wraps the underlying `serde_json::Error`.
+
+**Examples:**
+- Failed to serialize message payload
+- Failed to deserialize message from queue
+- Invalid JSON format
+
+```rust
+match queue.consume::<JobPayload>("jobs", None).await {
+    Err(BroccoliError::Serialization(e)) => {
+        eprintln!("Serialization error: {}", e);
+    }
+    Ok(message) => { /* process message */ }
+    Err(e) => eprintln!("Other error: {:?}", e),
+}
+```
+
+### Redis
+
+```rust
+#[cfg(feature = "redis")]
+Redis(redis::RedisError)
+```
+
+Represents Redis-specific errors. This variant wraps the underlying `redis::RedisError`. Only available with the `redis` feature.
+
+**Examples:**
+- Connection errors
+- Command execution failures
+- Authentication failures
+
+```rust
+if let Err(BroccoliError::Redis(e)) = result {
+    eprintln!("Redis error: {}", e);
+}
+```
+
+### SurrealDB
+
+```rust
+#[cfg(feature = "surrealdb")]
+SurrealDB(surrealdb::Error)
+```
+
+Represents SurrealDB-specific errors. This variant wraps the underlying `surrealdb::Error`. Only available with the `surrealdb` feature.
+
+**Examples:**
+- Connection errors
+- Query execution failures
+- Authentication failures
+
+```rust
+if let Err(BroccoliError::SurrealDB(e)) = result {
+    eprintln!("SurrealDB error: {}", e);
+}
+```
+
+### Job
+
+```rust
+Job(String)
+```
+
+Represents errors that occur during job processing.
+
+**Examples:**
+- Handler function errors
+- Job execution failures
+
+```rust
+queue.process_messages("jobs", None, None, |message| async move {
+    if should_fail {
+        return Err(BroccoliError::Job("Processing failed".to_string()));
+    }
+    Ok(())
+}).await?;
+```
+
+### QueueStatus
+
+```rust
+QueueStatus(String)
+```
+
+Represents errors that occur during checking queue status. Only relevant with the `management` feature.
+
+**Examples:**
+- Failed to retrieve queue statistics
+- Queue not found
+
+```rust
+if let Err(BroccoliError::QueueStatus(msg)) = queue.queue_status("jobs".to_string(), None).await {
+    eprintln!("Failed to get queue status: {}", msg);
+}
+```
+
+### ConnectionTimeout
+
+```rust
+ConnectionTimeout(u32)
+```
+
+Represents connection timeout errors. The contained value is the number of retry attempts that were made before timing out.
+
+```rust
+if let Err(BroccoliError::ConnectionTimeout(retries)) = result {
+    eprintln!("Connection timed out after {} retries", retries);
+}
+```
+
+### NotImplemented
+
+```rust
+NotImplemented
+```
+
+Represents errors that occur when a feature is not implemented for a specific broker.
+
+**Examples:**
+- Getting the position of a message for RabbitMQ
+- Unsupported operations on certain brokers
+
+```rust
+if let Err(BroccoliError::NotImplemented) = result {
+    eprintln!("This operation is not supported for this broker");
+}
+```
+
+## Error handling patterns
+
+### Match all variants
+
+```rust
+match queue.publish("jobs", None, &payload, None).await {
+    Ok(message) => println!("Published: {}", message.task_id),
+    Err(BroccoliError::Broker(msg)) => eprintln!("Broker error: {}", msg),
+    Err(BroccoliError::Publish(msg)) => eprintln!("Publish error: {}", msg),
+    Err(BroccoliError::Serialization(e)) => eprintln!("Serialization error: {}", e),
+    Err(e) => eprintln!("Unexpected error: {:?}", e),
+}
+```
+
+### Propagate with ?
+
+```rust
+async fn publish_job(queue: &BroccoliQueue, payload: &JobPayload) -> Result<(), BroccoliError> {
+    let message = queue.publish("jobs", None, payload, None).await?;
+    println!("Published: {}", message.task_id);
+    Ok(())
+}
+```
+
+### Handle specific errors
+
+```rust
+let result = queue.consume::<JobPayload>("jobs", None).await;
+if let Err(e) = result {
+    match e {
+        BroccoliError::Consume(_) | BroccoliError::Serialization(_) => {
+            log::error!("Failed to consume message: {:?}", e);
+            // Retry logic
+        }
+        BroccoliError::BrokerNonIdempotentRetriableOp(_) => {
+            log::warn!("Retriable error, retrying...");
+            // Retry immediately
+        }
+        _ => return Err(e),
+    }
+}
+```

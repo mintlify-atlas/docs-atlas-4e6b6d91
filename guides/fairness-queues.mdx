@@ -1,0 +1,341 @@
+---
+title: Fairness queues
+description: Use fairness queues with disambiguators to ensure balanced message processing across categories
+---
+
+Fairness queues ensure that messages from different sources or categories are processed in a balanced, round-robin fashion. This prevents any single source from monopolizing queue processing.
+
+<Note>
+Fairness queues are currently only supported by the Redis broker.
+</Note>
+
+## How fairness queues work
+
+Without fairness, if one source publishes 1000 messages and another publishes 10, the first source's messages will dominate processing. Fairness queues solve this by:
+
+1. Grouping messages by a **disambiguator** (category identifier)
+2. Consuming messages in round-robin fashion across disambiguators
+3. Ensuring each category gets fair processing time
+
+## Publishing with disambiguators
+
+Add a disambiguator when publishing to enable fairness:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    user_id: String,
+    task: String,
+}
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .build()
+    .await?;
+
+// Publish messages for different users
+let job1 = JobPayload { user_id: "user-123".to_string(), task: "export".to_string() };
+let job2 = JobPayload { user_id: "user-456".to_string(), task: "import".to_string() };
+let job3 = JobPayload { user_id: "user-123".to_string(), task: "process".to_string() };
+
+queue.publish("jobs", Some("user-123".to_string()), &job1, None).await?;
+queue.publish("jobs", Some("user-456".to_string()), &job2, None).await?;
+queue.publish("jobs", Some("user-123".to_string()), &job3, None).await?;
+```
+
+## Consuming with fairness
+
+Enable fairness mode when consuming:
+
+```rust
+use broccoli_queue::queue::ConsumeOptions;
+
+let options = ConsumeOptions::builder()
+    .fairness(true)
+    .build();
+
+queue.process_messages(
+    "jobs",
+    Some(4),
+    Some(options),
+    |message| async move {
+        println!("Processing from disambiguator: {:?}", message.disambiguator);
+        // Your processing logic
+        Ok(())
+    },
+).await?;
+```
+
+With fairness enabled, messages are consumed in round-robin order:
+
+```text
+Consume: user-123 message 1
+Consume: user-456 message 1
+Consume: user-123 message 2
+Consume: user-456 message 2
+...
+```
+
+## Choosing disambiguators
+
+Good disambiguator choices include:
+
+<CardGroup cols={2}>
+
+<Card title="User IDs" icon="user">
+Ensure each user gets fair processing:
+```rust
+queue.publish("jobs", 
+    Some(user_id.to_string()), 
+    &job, 
+    None
+).await?;
+```
+</Card>
+
+<Card title="Tenant IDs" icon="building">
+Balance work across tenants in multi-tenant systems:
+```rust
+queue.publish("tasks", 
+    Some(tenant_id.to_string()), 
+    &task, 
+    None
+).await?;
+```
+</Card>
+
+<Card title="Priority levels" icon="star">
+Process high, medium, and low priority fairly:
+```rust
+let disambiguator = format!("priority-{}", job.priority);
+queue.publish("jobs", 
+    Some(disambiguator), 
+    &job, 
+    None
+).await?;
+```
+</Card>
+
+<Card title="Source systems" icon="server">
+Balance messages from different data sources:
+```rust
+queue.publish("ingestion", 
+    Some(source_name.to_string()), 
+    &data, 
+    None
+).await?;
+```
+</Card>
+
+</CardGroup>
+
+## Batch publishing with disambiguators
+
+All messages in a batch share the same disambiguator:
+
+```rust
+let user_jobs = vec![job1, job2, job3];
+
+queue.publish_batch(
+    "jobs",
+    Some("user-123".to_string()), // All jobs for this user
+    user_jobs,
+    None,
+).await?;
+```
+
+## Accessing disambiguator in handlers
+
+The disambiguator is available in the message:
+
+```rust
+queue.process_messages("jobs", None, Some(options), |message| async move {
+    match message.disambiguator {
+        Some(disambiguator) => {
+            println!("Processing message for: {}", disambiguator);
+        }
+        None => {
+            println!("Message has no disambiguator");
+        }
+    }
+    Ok(())
+}).await?;
+```
+
+## Queue structure
+
+Behind the scenes, Redis creates separate queues for each disambiguator:
+
+```text
+jobs_user-123_queue
+jobs_user-123_processing
+jobs_user-123_failed
+
+jobs_user-456_queue
+jobs_user-456_processing
+jobs_user-456_failed
+
+jobs_fairness_set          (tracks all disambiguators)
+jobs_fairness_round_robin  (round-robin order)
+```
+
+## Monitoring fairness queues
+
+Check the status of all disambiguator queues:
+
+```rust
+let sizes = queue.size("jobs").await?;
+
+for (queue_name, size) in sizes {
+    println!("{}: {} messages", queue_name, size);
+}
+```
+
+With the management feature, get detailed status:
+
+```rust
+#[cfg(feature = "management")]
+use broccoli_queue::brokers::management::QueueStatus;
+
+// Get status for specific disambiguator
+let status = queue.queue_status(
+    "jobs".to_string(),
+    Some("user-123".to_string()),
+).await?;
+
+println!("User 123 - Pending: {}, Failed: {}", 
+    status.pending_count, 
+    status.failed_count
+);
+```
+
+## Example: Multi-tenant job processor
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, ConsumeOptions};
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TenantJob {
+    tenant_id: String,
+    job_type: String,
+    data: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(10)
+        .build()
+        .await?;
+    
+    // Publish jobs for different tenants
+    for i in 1..=3 {
+        let tenant_id = format!("tenant-{}", i);
+        
+        for j in 1..=5 {
+            let job = TenantJob {
+                tenant_id: tenant_id.clone(),
+                job_type: "data_export".to_string(),
+                data: format!("job-{}", j),
+            };
+            
+            queue.publish(
+                "tenant_jobs",
+                Some(tenant_id.clone()),
+                &job,
+                None,
+            ).await?;
+        }
+    }
+    
+    println!("Published 15 jobs across 3 tenants");
+    
+    // Consume with fairness
+    let options = ConsumeOptions::builder()
+        .fairness(true)
+        .build();
+    
+    queue.process_messages(
+        "tenant_jobs",
+        Some(5), // 5 concurrent workers
+        Some(options),
+        |message| async move {
+            println!("Processing for {}: {:?}", 
+                message.disambiguator.unwrap_or_default(),
+                message.payload
+            );
+            Ok(())
+        },
+    ).await?;
+    
+    Ok(())
+}
+```
+
+## Fairness without fairness mode
+
+You can publish with disambiguators but consume without fairness mode:
+
+```rust
+// Publishing with disambiguator
+queue.publish("jobs", Some("user-123".to_string()), &job, None).await?;
+
+// Consuming without fairness (FIFO order)
+let message = queue.consume::<JobPayload>("jobs", None).await?;
+```
+
+In this case, messages are still grouped by disambiguator but consumed in FIFO order across all groups.
+
+## Best practices
+
+<AccordionGroup>
+
+<Accordion title="Use consistent disambiguators">
+Ensure all publishers use the same disambiguator format for the same categories:
+```rust
+// Good: Consistent format
+let disambiguator = format!("user-{}", user_id);
+
+// Bad: Inconsistent formats
+let d1 = format!("user-{}", user_id);
+let d2 = user_id.to_string(); // Different format!
+```
+</Accordion>
+
+<Accordion title="Avoid too many disambiguators">
+Having thousands of active disambiguators can impact performance. Consider grouping:
+```rust
+// Instead of one per user
+let user_group = user_id % 100;
+let disambiguator = format!("group-{}", user_group);
+```
+</Accordion>
+
+<Accordion title="Monitor queue balance">
+Regularly check that queues are balanced:
+```rust
+let sizes = queue.size("jobs").await?;
+let max = sizes.values().max().unwrap_or(&0);
+let min = sizes.values().min().unwrap_or(&0);
+
+if max - min > 1000 {
+    println!("Warning: Queue imbalance detected");
+}
+```
+</Accordion>
+
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Publishing messages" icon="paper-plane" href="/guides/publishing">
+    Learn more about message publishing
+  </Card>
+  <Card title="Consuming messages" icon="inbox" href="/guides/consuming">
+    Advanced consumption patterns
+  </Card>
+</CardGroup>

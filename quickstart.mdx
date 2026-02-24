@@ -1,80 +1,321 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Build your first message queue producer and consumer with Broccoli
 ---
 
-## Get started in three steps
+## Overview
 
-Get your documentation site running locally and make your first customization.
+This guide will walk you through creating a simple producer-consumer system using Broccoli. You'll learn how to:
 
-### Step 1: Set up your local environment
+- Define a message payload structure
+- Publish messages to a queue
+- Consume and process messages
+- Handle errors and retries
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Note>
+  Make sure you've completed the [installation](/installation) and have a Redis instance running on `localhost:6379`.
+</Note>
 
-### Step 2: Deploy your changes
+## Define your message type
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+First, define the structure of your messages using Serde:
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+```rust
+use serde::{Deserialize, Serialize};
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+}
+```
 
-### Step 3: Go live
+<Note>
+  Your message types must implement `Clone`, `Serialize`, and `Deserialize` traits.
+</Note>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+## Create a producer
+
+The producer publishes messages to a queue. Here's a complete example:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize the queue
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(5)
+        .failed_message_retry_strategy(Default::default())
+        .build()
+        .await?;
+
+    // Create jobs to publish
+    let jobs = vec![
+        JobPayload {
+            id: "job-1".to_string(),
+            task_name: "process_data".to_string(),
+        },
+        JobPayload {
+            id: "job-2".to_string(),
+            task_name: "generate_report".to_string(),
+        },
+    ];
+
+    // Publish jobs in batch
+    queue.publish_batch("jobs", None, jobs, None).await?;
+
+    println!("Published jobs successfully!");
+    Ok(())
+}
+```
+
+<Steps>
+  <Step title="Initialize the queue">
+    Create a `BroccoliQueue` instance with your broker URL:
+    ```rust
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(5)
+        .failed_message_retry_strategy(Default::default())
+        .build()
+        .await?;
+    ```
+  </Step>
+  <Step title="Create your messages">
+    Instantiate your message payloads:
+    ```rust
+    let jobs = vec![
+        JobPayload {
+            id: "job-1".to_string(),
+            task_name: "process_data".to_string(),
+        },
+    ];
+    ```
+  </Step>
+  <Step title="Publish to the queue">
+    Use `publish_batch` to send multiple messages at once:
+    ```rust
+    queue.publish_batch("jobs", None, jobs, None).await?;
+    ```
+  </Step>
+</Steps>
+
+## Create a consumer
+
+The consumer processes messages from the queue. Here's a complete example:
+
+```rust
+use broccoli_queue::{error::BroccoliError, queue::BroccoliQueue};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize the queue
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(5)
+        .failed_message_retry_strategy(Default::default())
+        .build()
+        .await?;
+
+    // Process messages with 2 concurrent workers
+    queue
+        .process_messages(
+            "jobs",
+            Some(2),
+            None,
+            |message| async move {
+                println!("Processing job: {:?}", message.payload);
+                
+                // Simulate some work
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                
+                Ok(())
+            },
+        )
+        .await?;
+
+    Ok(())
+}
+```
+
+<Steps>
+  <Step title="Initialize the queue">
+    Create a `BroccoliQueue` instance with the same configuration as your producer:
+    ```rust
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(5)
+        .failed_message_retry_strategy(Default::default())
+        .build()
+        .await?;
+    ```
+  </Step>
+  <Step title="Process messages">
+    Call `process_messages` with your handler function:
+    ```rust
+    queue.process_messages(
+        "jobs",      // Queue name
+        Some(2),     // Number of concurrent workers
+        None,        // Consume options
+        |message| async move {
+            // Your message processing logic
+            println!("Processing: {:?}", message.payload);
+            Ok(())
+        },
+    ).await?;
+    ```
+  </Step>
+</Steps>
+
+## Understanding the flow
+
+Here's what happens when you run both the producer and consumer:
+
+1. **Producer** publishes messages to the `jobs` queue
+2. **Consumer** pulls messages from the queue
+3. **Handler** processes each message
+4. On success, the message is acknowledged and removed from the queue
+5. On error, the message is retried according to your retry strategy
+
+## Configure retry behavior
+
+Customize how failed messages are handled:
+
+```rust
+use broccoli_queue::queue::RetryStrategy;
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(5)
+    .failed_message_retry_strategy(
+        RetryStrategy::new()
+            .with_attempts(5)        // Retry up to 5 times
+            .retry_failed(true)      // Enable retries
+    )
+    .build()
+    .await?;
+```
+
+## Advanced message handling
+
+For more control over success and error handling, use `process_messages_with_handlers`:
+
+```rust
+use broccoli_queue::{error::BroccoliError, queue::BroccoliQueue};
+
+async fn process_job(message: BrokerMessage<JobPayload>) -> Result<(), BroccoliError> {
+    println!("Processing job: {} ({})", message.payload.id, message.payload.task_name);
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    Ok(())
+}
+
+async fn on_success(message: BrokerMessage<JobPayload>, _result: ()) -> Result<(), BroccoliError> {
+    println!("Successfully processed message: {:?}", message.task_id);
+    Ok(())
+}
+
+async fn on_error(message: BrokerMessage<JobPayload>, err: BroccoliError) -> Result<(), BroccoliError> {
+    eprintln!("Failed to process message {}: {}", message.payload.id, err);
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(5)
+        .failed_message_retry_strategy(Default::default())
+        .build()
+        .await?;
+
+    queue
+        .process_messages_with_handlers(
+            "jobs",
+            Some(5),     // 5 concurrent workers
+            None,
+            process_job,
+            on_success,
+            on_error,
+        )
+        .await?;
+
+    Ok(())
+}
+```
+
+## Publish options
+
+Control message delivery with publish options:
+
+```rust
+use broccoli_queue::queue::PublishOptions;
+use time::Duration;
+
+// Publish with a 10-second delay
+let options = PublishOptions {
+    delay: Some(Duration::seconds(10)),
+    priority: Some(1),  // Priority 1-5 (1 is highest)
+    ttl: None,
+    scheduled_at: None,
+};
+
+queue.publish_batch("jobs", None, jobs, Some(options)).await?;
+```
+
+<Note>
+  Message scheduling requires enabling the `enable_scheduling` option when building the queue. For RabbitMQ, you'll also need the delayed-exchange plugin.
+</Note>
+
+## Using different brokers
+
+<CodeGroup>
+
+```rust Redis
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .build()
+    .await?;
+```
+
+```rust RabbitMQ
+let queue = BroccoliQueue::builder("amqp://localhost:5672")
+    .enable_scheduling(true)  // Requires delayed-exchange plugin
+    .build()
+    .await?;
+```
+
+```rust SurrealDB
+let queue = BroccoliQueue::builder("ws://localhost:8000")
+    .build()
+    .await?;
+```
+
+</CodeGroup>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card
+    title="API reference"
+    icon="code"
+    href="https://docs.rs/broccoli_queue"
+  >
+    Explore the complete API documentation
+  </Card>
+  <Card
+    title="Examples"
+    icon="github"
+    href="https://github.com/densumesh/broccoli/tree/main/examples"
+  >
+    Browse more examples on GitHub
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

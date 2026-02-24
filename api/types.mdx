@@ -1,0 +1,452 @@
+---
+title: Types
+description: Core types and configuration structures for message handling
+---
+
+Broccoli provides several types for configuring message behavior and handling message data.
+
+## BrokerMessage
+
+A wrapper for messages that includes metadata for processing.
+
+```rust
+pub struct BrokerMessage<T: Clone> {
+    pub task_id: uuid::Uuid,
+    pub payload: T,
+    pub attempts: u8,
+    pub disambiguator: Option<String>,
+}
+```
+
+<ParamField path="task_id" type="uuid::Uuid">
+  Unique identifier for the message, automatically generated.
+</ParamField>
+
+<ParamField path="payload" type="T">
+  The actual message content. Must implement `Clone`, `Serialize`, and `DeserializeOwned`.
+</ParamField>
+
+<ParamField path="attempts" type="u8">
+  Number of processing attempts made for this message.
+</ParamField>
+
+<ParamField path="disambiguator" type="Option<String>">
+  Optional disambiguator for fairness queues. Messages with the same disambiguator are processed in order.
+</ParamField>
+
+### new
+
+```rust
+pub fn new(payload: T, disambiguator: Option<String>) -> Self
+```
+
+Creates a new `BrokerMessage` with the provided payload.
+
+```rust
+let message = BrokerMessage::new(payload, Some("user_123".to_string()));
+println!("Message ID: {}", message.task_id);
+```
+
+## PublishOptions
+
+Options for publishing messages to the broker.
+
+```rust
+pub struct PublishOptions {
+    pub ttl: Option<Duration>,
+    pub priority: Option<u8>,
+    pub delay: Option<Duration>,
+    pub scheduled_at: Option<OffsetDateTime>,
+}
+```
+
+<ParamField path="ttl" type="Option<Duration>">
+  Time-to-live for the message. From the `time::Duration` type.
+</ParamField>
+
+<ParamField path="priority" type="Option<u8>">
+  Message priority level. Must be between 1 and 5, where 1 is highest priority and 5 is lowest.
+</ParamField>
+
+<ParamField path="delay" type="Option<Duration>">
+  Delay before the message is published. From the `time::Duration` type.
+</ParamField>
+
+<ParamField path="scheduled_at" type="Option<OffsetDateTime>">
+  Scheduled time for the message to be published. From the `time::OffsetDateTime` type.
+</ParamField>
+
+### builder
+
+```rust
+pub const fn builder() -> PublishOptionsBuilder
+```
+
+Creates a new `PublishOptionsBuilder` for constructing `PublishOptions` with a fluent interface.
+
+```rust
+use time::Duration;
+
+let options = PublishOptions::builder()
+    .ttl(Duration::hours(24))
+    .priority(2)
+    .delay(Duration::minutes(5))
+    .build();
+```
+
+## PublishOptionsBuilder
+
+Builder for constructing `PublishOptions` with a fluent interface.
+
+### new
+
+```rust
+pub const fn new() -> Self
+```
+
+Creates a new `PublishOptionsBuilder` with default values.
+
+### ttl
+
+```rust
+pub const fn ttl(mut self, duration: Duration) -> Self
+```
+
+Sets the time-to-live duration for the message.
+
+### delay
+
+```rust
+pub const fn delay(mut self, duration: Duration) -> Self
+```
+
+Sets a delay before the message is published.
+
+### schedule_at
+
+```rust
+pub const fn schedule_at(mut self, time: OffsetDateTime) -> Self
+```
+
+Sets a specific time for the message to be published.
+
+### priority
+
+```rust
+pub fn priority(mut self, priority: u8) -> Self
+```
+
+Sets the priority level for the message. Must be between 1 and 5.
+
+**Panics** if the priority is not between 1 and 5.
+
+### build
+
+```rust
+pub const fn build(self) -> PublishOptions
+```
+
+Builds the `PublishOptions` with the configured values.
+
+```rust
+use time::{Duration, OffsetDateTime};
+
+let options = PublishOptions::builder()
+    .ttl(Duration::hours(1))
+    .priority(1)
+    .build();
+
+queue.publish("jobs", None, &payload, Some(options)).await?;
+```
+
+## ConsumeOptions
+
+Options for consuming messages from the broker.
+
+```rust
+pub struct ConsumeOptions {
+    pub auto_ack: Option<bool>,
+    pub fairness: Option<bool>,
+    pub consume_wait: Option<std::time::Duration>,
+    pub handler_ack: Option<bool>,
+}
+```
+
+<ParamField path="auto_ack" type="Option<bool>">
+  Whether to auto-acknowledge messages. Default is `false`. If you try to acknowledge or reject a message that has been auto-acknowledged, it will result in an error.
+</ParamField>
+
+<ParamField path="fairness" type="Option<bool>">
+  Whether to consume from a fairness queue. Only supported by the Redis broker.
+</ParamField>
+
+<ParamField path="consume_wait" type="Option<std::time::Duration>">
+  How long to wait in tight consumer loops, which allows those functions to be stopped in a `tokio::spawn` thread. Defaults to zero to lower performance impact.
+</ParamField>
+
+<ParamField path="handler_ack" type="Option<bool>">
+  After a handler is executed successfully, acknowledgment is executed after. Set this to `false` to skip that and leave the queue untouched after a handler runs. Default is `true`.
+</ParamField>
+
+### builder
+
+```rust
+pub const fn builder() -> ConsumeOptionsBuilder
+```
+
+Creates a new `ConsumeOptionsBuilder` for constructing `ConsumeOptions` with a fluent interface.
+
+```rust
+let options = ConsumeOptions::builder()
+    .auto_ack(false)
+    .fairness(true)
+    .build();
+```
+
+## ConsumeOptionsBuilder
+
+Builder for constructing `ConsumeOptions` with a fluent interface.
+
+### new
+
+```rust
+pub const fn new() -> Self
+```
+
+Creates a new `ConsumeOptionsBuilder` with default values.
+
+### auto_ack
+
+```rust
+pub const fn auto_ack(mut self, auto_ack: bool) -> Self
+```
+
+Sets whether messages should be auto-acknowledged.
+
+### fairness
+
+```rust
+pub const fn fairness(mut self, fairness: bool) -> Self
+```
+
+Sets whether to consume from a fairness queue.
+
+### consume_wait
+
+```rust
+pub const fn consume_wait(mut self, consume_wait: std::time::Duration) -> Self
+```
+
+Time to wait between iterations of tight consumer loops, so they can be interrupted.
+
+### handler_ack
+
+```rust
+pub const fn handler_ack(mut self, followup: bool) -> Self
+```
+
+Set to `false` if you don't want to run acknowledge after successful handler execution.
+
+### build
+
+```rust
+pub const fn build(self) -> ConsumeOptions
+```
+
+Builds the `ConsumeOptions` with the configured values.
+
+```rust
+use std::time::Duration;
+
+let options = ConsumeOptions::builder()
+    .auto_ack(false)
+    .fairness(true)
+    .consume_wait(Duration::from_millis(100))
+    .handler_ack(true)
+    .build();
+
+let message = queue.consume::<JobPayload>("jobs", Some(options)).await?;
+```
+
+## RetryStrategy
+
+Configuration for message retry behavior.
+
+```rust
+pub struct RetryStrategy {
+    pub retry_failed: bool,
+    pub attempts: Option<u8>,
+}
+```
+
+<ParamField path="retry_failed" type="bool">
+  Whether failed messages should be retried.
+</ParamField>
+
+<ParamField path="attempts" type="Option<u8>">
+  Maximum number of retry attempts. If `None`, defaults to 3.
+</ParamField>
+
+### new
+
+```rust
+pub const fn new() -> Self
+```
+
+Creates a new retry strategy with default settings (3 attempts, retry enabled).
+
+### with_attempts
+
+```rust
+pub const fn with_attempts(mut self, attempts: u8) -> Self
+```
+
+Sets the maximum number of retry attempts.
+
+### retry_failed
+
+```rust
+pub const fn retry_failed(mut self, retry_failed: bool) -> Self
+```
+
+Enables or disables message retrying.
+
+```rust
+let strategy = RetryStrategy::new()
+    .with_attempts(5)
+    .retry_failed(true);
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(strategy)
+    .build()
+    .await?;
+```
+
+## BroccoliQueueBuilder
+
+Builder for configuring and creating a `BroccoliQueue` instance.
+
+### new
+
+```rust
+pub fn new(broker_url: impl Into<String>) -> Self
+```
+
+Creates a new `BroccoliQueueBuilder` with the specified broker URL.
+
+### new_with_surrealdb
+
+```rust
+pub fn new_with_surrealdb(db: surrealdb::Surreal<surrealdb::engine::any::Any>) -> Self
+```
+
+Creates a new `BroccoliQueueBuilder` with the specified database connection. Only available with the `surrealdb` feature.
+
+### failed_message_retry_strategy
+
+```rust
+pub const fn failed_message_retry_strategy(mut self, strategy: RetryStrategy) -> Self
+```
+
+Sets the retry strategy for failed messages.
+
+### pool_connections
+
+```rust
+pub const fn pool_connections(mut self, connections: u8) -> Self
+```
+
+Sets the number of connections in the connection pool.
+
+### enable_scheduling
+
+```rust
+pub const fn enable_scheduling(mut self, enable_scheduling: bool) -> Self
+```
+
+Enables or disables message scheduling. For RabbitMQ, you need to install the delayed-exchange plugin.
+
+### build
+
+```rust
+pub async fn build(self) -> Result<BroccoliQueue, BroccoliError>
+```
+
+Builds the `BroccoliQueue` with the specified configuration.
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(
+        RetryStrategy::new().with_attempts(5)
+    )
+    .pool_connections(10)
+    .enable_scheduling(false)
+    .build()
+    .await?;
+```
+
+## QueueStatus
+
+Struct representing the status of a queue. Only available with the `management` feature.
+
+```rust
+pub struct QueueStatus {
+    pub name: String,
+    pub queue_type: QueueType,
+    pub size: usize,
+    pub processing: usize,
+    pub failed: usize,
+    pub disambiguator_count: Option<usize>,
+}
+```
+
+<ParamField path="name" type="String">
+  Name of the queue.
+</ParamField>
+
+<ParamField path="queue_type" type="QueueType">
+  Type of the queue (Main, Processing, Failed, or Fairness).
+</ParamField>
+
+<ParamField path="size" type="usize">
+  Size of the queue.
+</ParamField>
+
+<ParamField path="processing" type="usize">
+  Number of messages currently being processed.
+</ParamField>
+
+<ParamField path="failed" type="usize">
+  Number of messages that failed to be processed.
+</ParamField>
+
+<ParamField path="disambiguator_count" type="Option<usize>">
+  If the queue is a fairness queue, the number of disambiguators.
+</ParamField>
+
+```rust
+let status = queue.queue_status("jobs".to_string(), None).await?;
+println!("Queue: {}", status.name);
+println!("Type: {}", status.queue_type);
+println!("Size: {}", status.size);
+println!("Processing: {}", status.processing);
+println!("Failed: {}", status.failed);
+```
+
+## QueueType
+
+Enum representing the type of queue.
+
+```rust
+pub enum QueueType {
+    Failed,
+    Processing,
+    Main,
+    Fairness,
+}
+```
+
+- **Failed** - Queue containing failed messages
+- **Processing** - Queue containing messages currently being processed
+- **Main** - Main message queue
+- **Fairness** - Fairness queue for ordered processing per disambiguator

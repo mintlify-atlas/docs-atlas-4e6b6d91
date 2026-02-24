@@ -1,0 +1,234 @@
+---
+title: Basic consumer
+description: Learn how to consume and process messages from a Broccoli queue
+---
+
+This guide shows you how to create a consumer that processes messages from a queue. You'll learn how to consume messages, handle success and error cases, and acknowledge processed messages.
+
+## Prerequisites
+
+Add Broccoli to your `Cargo.toml`:
+
+```toml
+[dependencies]
+broccoli-queue = { version = "0.1", features = ["redis"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+chrono = "0.4"
+```
+
+## Define your message payload
+
+Define the same message structure that your producer uses:
+
+```rust
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+    parameters: Parameters,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Parameters {
+    input_data: String,
+    priority: u8,
+    timeout_seconds: u32,
+}
+```
+
+## Connect to the broker
+
+Initialize a queue connection with the same configuration as your producer:
+
+```rust
+use broccoli_queue::{error::BroccoliError, queue::BroccoliQueue};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6380")
+        .pool_connections(5)
+        .failed_message_retry_strategy(Default::default())
+        .build()
+        .await?;
+
+    Ok(())
+}
+```
+
+## Process messages with a handler
+
+Use `process_messages()` to continuously consume and process messages from a queue:
+
+```rust
+async fn process_job(job: JobPayload) -> Result<(), BroccoliError> {
+    println!("Processing job: {} ({})", job.id, job.task_name);
+
+    // Simulate work
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    Ok(())
+}
+
+queue
+    .process_messages("jobs", Some(4), None, |msg| async move {
+        process_job(msg.payload).await
+    })
+    .await?;
+```
+
+<Note>
+The second parameter (`Some(4)`) specifies the number of concurrent workers. Set it to `None` for unlimited concurrency.
+</Note>
+
+## Handle success and error cases
+
+For more control over message handling, use `process_messages_with_handlers()` to define separate handlers for success and error cases:
+
+```rust
+async fn success_handler(msg: JobPayload) -> Result<(), BroccoliError> {
+    println!("Successfully processed: {:?}", msg);
+    Ok(())
+}
+
+async fn error_handler(msg: JobPayload, err: BroccoliError) -> Result<(), BroccoliError> {
+    eprintln!("Failed to process {}: {}", msg.id, err);
+    Ok(())
+}
+
+queue
+    .process_messages_with_handlers(
+        "jobs",
+        Some(5),
+        None,
+        |msg| async move { process_job(msg.payload).await },
+        |msg, result| async { success_handler(msg.payload).await },
+        |msg, err| async { error_handler(msg.payload, err).await },
+    )
+    .await?;
+```
+
+## Manual message consumption
+
+For more control, you can manually consume and acknowledge messages:
+
+```rust
+use broccoli_queue::queue::ConsumeOptions;
+
+// Consume a single message
+let message = queue
+    .consume::<JobPayload>("jobs", Some(ConsumeOptions::default()))
+    .await?;
+
+println!("Received message: {:?}", message.payload);
+
+// Process the message
+process_job(message.payload.clone()).await?;
+
+// Acknowledge the message
+queue.acknowledge("jobs", message).await?;
+```
+
+<Note>
+When you manually consume messages, you must explicitly acknowledge them. Failing to acknowledge will cause messages to be reprocessed after a timeout.
+</Note>
+
+## Reject failed messages
+
+If a message fails processing, you can reject it to move it to the failed queue:
+
+```rust
+let message = queue
+    .consume::<JobPayload>("jobs", Some(ConsumeOptions::default()))
+    .await?;
+
+match process_job(message.payload.clone()).await {
+    Ok(_) => queue.acknowledge("jobs", message).await?,
+    Err(e) => {
+        eprintln!("Job failed: {}", e);
+        queue.reject("jobs", message).await?;
+    }
+}
+```
+
+## Complete example
+
+Here's a complete consumer that demonstrates both processing patterns:
+
+```rust
+use broccoli_queue::{error::BroccoliError, queue::BroccoliQueue};
+use serde::{Deserialize, Serialize};
+use std::{error::Error, time::Duration};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+    parameters: Parameters,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Parameters {
+    input_data: String,
+    priority: u8,
+    timeout_seconds: u32,
+}
+
+async fn process_job(job: JobPayload) -> Result<(), BroccoliError> {
+    println!("Processing job: {} ({})", job.id, job.task_name);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    Ok(())
+}
+
+async fn success_handler(msg: JobPayload) -> Result<(), BroccoliError> {
+    println!("Successfully processed message: {msg:?}");
+    Ok(())
+}
+
+async fn error_handler(msg: JobPayload, err: BroccoliError) -> Result<(), BroccoliError> {
+    eprintln!("Failed to process message: {}. Error: {}", msg.id, err);
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6380")
+        .pool_connections(5)
+        .failed_message_retry_strategy(Default::default())
+        .build()
+        .await?;
+
+    // Process messages with basic handler
+    queue
+        .process_messages("jobs", Some(4), None, |msg| async move {
+            process_job(msg.payload).await
+        })
+        .await
+        .unwrap();
+
+    // Process messages with success and error handlers
+    queue
+        .process_messages_with_handlers(
+            "jobs",
+            Some(5),
+            None,
+            |msg| async move { process_job(msg.payload).await },
+            |msg, result| async { success_handler(msg.payload).await },
+            |msg, err| async { error_handler(msg.payload, err).await },
+        )
+        .await?;
+
+    println!("Consumer shutdown complete");
+    Ok(())
+}
+```
+
+## Next steps
+
+- Learn about [advanced patterns](/examples/advanced-patterns)
+- Configure [consume options](/guides/consuming)
+- Set up [retry strategies](/guides/retry-strategies)

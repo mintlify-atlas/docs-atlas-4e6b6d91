@@ -1,0 +1,191 @@
+---
+title: Installation
+description: Add Broccoli to your Rust project and configure your message broker
+---
+
+## Install with Cargo
+
+Add Broccoli to your `Cargo.toml` dependencies:
+
+```toml Cargo.toml
+[dependencies]
+broccoli_queue = "0.4.6"
+```
+
+<Note>
+  The default feature enables Redis support. If you need a different broker, see the broker-specific configuration below.
+</Note>
+
+## Broker-specific configuration
+
+Broccoli supports multiple message brokers. Choose the one that fits your infrastructure:
+
+### Redis (default)
+
+Redis support is enabled by default. No additional configuration needed:
+
+```toml Cargo.toml
+[dependencies]
+broccoli_queue = "0.4.6"
+```
+
+Or explicitly enable the Redis feature:
+
+```toml Cargo.toml
+[dependencies]
+broccoli_queue = { version = "0.4.6", features = ["redis"] }
+```
+
+### RabbitMQ
+
+To use RabbitMQ as your message broker:
+
+```toml Cargo.toml
+[dependencies]
+broccoli_queue = { version = "0.4.6", features = ["rabbitmq"] }
+```
+
+<Note>
+  If you want to enable message scheduling with RabbitMQ, you'll need to install the [delayed-exchange plugin](https://www.rabbitmq.com/blog/2015/04/16/scheduling-messages-with-rabbitmq).
+</Note>
+
+### SurrealDB
+
+For SurrealDB support (experimental):
+
+```toml Cargo.toml
+[dependencies]
+broccoli_queue = { version = "0.4.6", features = ["surrealdb"] }
+```
+
+### Multiple brokers
+
+You can enable multiple broker features simultaneously:
+
+```toml Cargo.toml
+[dependencies]
+broccoli_queue = { version = "0.4.6", features = ["redis", "rabbitmq"] }
+```
+
+## Additional dependencies
+
+For most applications, you'll also need these common dependencies:
+
+```toml Cargo.toml
+[dependencies]
+broccoli_queue = "0.4.6"
+tokio = { version = "1.42", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+```
+
+<Steps>
+  <Step title="Add Tokio">
+    Broccoli is built on Tokio, so you'll need the async runtime:
+    ```toml
+    tokio = { version = "1.42", features = ["full"] }
+    ```
+  </Step>
+  <Step title="Add Serde">
+    Messages are serialized using Serde, which requires the derive feature:
+    ```toml
+    serde = { version = "1.0", features = ["derive"] }
+    ```
+  </Step>
+</Steps>
+
+## Management API (optional)
+
+To access queue management features like status monitoring:
+
+```toml Cargo.toml
+[dependencies]
+broccoli_queue = { version = "0.4.6", features = ["management"] }
+```
+
+The management feature enables:
+- Queue status monitoring
+- Queue size inspection
+- Additional management operations
+
+## Verify installation
+
+Verify your installation by checking the version:
+
+```bash
+cargo tree | grep broccoli_queue
+```
+
+You should see output similar to:
+
+```
+broccoli_queue v0.4.6
+```
+
+## Set up your broker
+
+Before you can start using Broccoli, you need a running message broker.
+
+### Redis setup
+
+Install and start Redis:
+
+<CodeGroup>
+
+```bash macOS
+brew install redis
+brew services start redis
+```
+
+```bash Ubuntu/Debian
+sudo apt-get update
+sudo apt-get install redis-server
+sudo systemctl start redis
+```
+
+```bash Docker
+docker run -d -p 6379:6379 redis:latest
+```
+
+</CodeGroup>
+
+### RabbitMQ setup
+
+Install and start RabbitMQ:
+
+<CodeGroup>
+
+```bash macOS
+brew install rabbitmq
+brew services start rabbitmq
+```
+
+```bash Ubuntu/Debian
+sudo apt-get update
+sudo apt-get install rabbitmq-server
+sudo systemctl start rabbitmq-server
+```
+
+```bash Docker
+docker run -d -p 5672:5672 rabbitmq:latest
+```
+
+</CodeGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Quickstart guide"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Build your first producer and consumer
+  </Card>
+  <Card
+    title="API reference"
+    icon="code"
+    href="https://docs.rs/broccoli_queue"
+  >
+    Explore the complete API documentation
+  </Card>
+</CardGroup>

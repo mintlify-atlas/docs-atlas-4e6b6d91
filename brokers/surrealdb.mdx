@@ -1,0 +1,425 @@
+---
+title: "SurrealDB broker"
+description: "Set up and use SurrealDB as a message broker for Broccoli"
+---
+
+<Info>
+  **Prerequisites**:
+  - SurrealDB server (version 2.0 or higher)
+  - Rust project with Broccoli configured
+</Info>
+
+SurrealDB provides a unified database and message queue in one system, ideal for applications that need both data persistence and task queuing. It features live queries for efficient blocking consumption.
+
+## Enable the SurrealDB feature
+
+Add Broccoli to your `Cargo.toml` with the SurrealDB feature:
+
+```toml Cargo.toml
+[dependencies]
+broccoli_queue = { version = "0.4", features = ["surrealdb"] }
+```
+
+## Connect to SurrealDB
+
+Create a queue instance with a SurrealDB connection URL:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder(
+        "ws://localhost:8000?ns=my_namespace&db=my_database&username=root&password=root"
+    )
+    .build()
+    .await?;
+
+    Ok(())
+}
+```
+
+## Connection parameters
+
+The SurrealDB broker requires these URL parameters:
+
+```rust
+// WebSocket connection
+"ws://localhost:8000?ns=namespace&db=database&username=user&password=pass"
+
+// Secure WebSocket
+"wss://localhost:8000?ns=namespace&db=database&username=user&password=pass"
+
+// HTTP connection
+"http://localhost:8000?ns=namespace&db=database&username=user&password=pass"
+
+// Memory backend (for testing)
+"mem://?ns=test&db=test&username=root&password=root"
+```
+
+<Warning>
+  All parameters are mandatory:
+  - `ns`: Namespace name
+  - `db`: Database name
+  - `username`: Authentication username
+  - `password`: Authentication password
+</Warning>
+
+## Alternative connection
+
+You can provide a pre-configured SurrealDB client:
+
+```rust
+use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
+use broccoli_queue::queue::BroccoliQueue;
+
+let db: Surreal<Any> = surrealdb::Surreal::new("ws://localhost:8000").await?;
+db.signin(surrealdb::opt::auth::Root {
+    username: "root",
+    password: "root",
+}).await?;
+db.use_ns("namespace").use_db("database").await?;
+
+let queue = BroccoliQueue::builder("")
+    .surrealdb_connection(db)
+    .build()
+    .await?;
+```
+
+## Configuration
+
+Customize the SurrealDB broker behavior:
+
+```rust
+let queue = BroccoliQueue::builder(url)
+    .retry_attempts(5)              // Max retry attempts (default: 3)
+    .retry_failed(true)             // Retry failed messages (default: true)
+    .enable_scheduling(true)        // Enable delayed/scheduled messages
+    .build()
+    .await?;
+```
+
+<Note>
+  SurrealDB broker does not use connection pooling. The `pool_connections` setting is ignored.
+</Note>
+
+## Publish messages
+
+<Steps>
+<Step title="Basic publishing">
+
+Publish a message to a queue:
+
+```rust
+use serde::{Serialize, Deserialize};
+use broccoli_queue::queue::BroccoliQueue;
+
+#[derive(Serialize, Deserialize)]
+struct Task {
+    id: String,
+    operation: String,
+    data: serde_json::Value,
+}
+
+let task = Task {
+    id: "task-1".to_string(),
+    operation: "process".to_string(),
+    data: serde_json::json!({ "key": "value" }),
+};
+
+queue.publish("tasks", None, task, None).await?;
+```
+
+</Step>
+
+<Step title="Priority messages">
+
+Set message priority (1-5, where 1 is highest):
+
+```rust
+use broccoli_queue::queue::PublishOptions;
+
+queue.publish(
+    "tasks",
+    None,
+    task,
+    Some(PublishOptions {
+        priority: Some(1),  // High priority
+        ..Default::default()
+    })
+).await?;
+```
+
+</Step>
+
+<Step title="Delayed messages">
+
+Schedule messages for future delivery:
+
+```rust
+use time::Duration;
+use broccoli_queue::queue::PublishOptions;
+
+queue.publish(
+    "tasks",
+    None,
+    task,
+    Some(PublishOptions {
+        delay: Some(Duration::minutes(10)),
+        ..Default::default()
+    })
+).await?;
+```
+
+<Warning>
+  Delayed messages require `enable_scheduling(true)` in the queue configuration.
+</Warning>
+
+</Step>
+
+<Step title="Scheduled messages">
+
+Schedule messages for a specific timestamp:
+
+```rust
+use time::OffsetDateTime;
+
+let future_time = OffsetDateTime::now_utc() + Duration::hours(2);
+
+queue.publish(
+    "tasks",
+    None,
+    task,
+    Some(PublishOptions {
+        scheduled_at: Some(future_time),
+        ..Default::default()
+    })
+).await?;
+```
+
+</Step>
+</Steps>
+
+## Consume messages
+
+<Steps>
+<Step title="Blocking consumption">
+
+Consume messages with efficient live queries:
+
+```rust
+queue.process_messages(
+    "tasks",
+    Some(4),  // Number of concurrent workers
+    None,
+    |msg| async move {
+        let task: Task = msg.payload;
+        println!("Processing: {}", task.operation);
+        Ok(())
+    }
+).await?;
+```
+
+</Step>
+
+<Step title="Non-blocking consumption">
+
+Try to consume without blocking:
+
+```rust
+use broccoli_queue::queue::ConsumeOptions;
+
+if let Some(message) = queue.try_consume(
+    "tasks",
+    Some(ConsumeOptions::default())
+).await? {
+    // Process message
+    println!("Got message: {}", message.task_id);
+}
+```
+
+</Step>
+
+<Step title="Batch consumption">
+
+Consume multiple messages at once:
+
+```rust
+let messages = queue.try_consume_batch(
+    "tasks",
+    10,  // Batch size
+    None
+).await?;
+
+for msg in messages {
+    println!("Processing batch message: {}", msg.task_id);
+}
+```
+
+</Step>
+</Steps>
+
+## Live queries
+
+SurrealDB's live query feature enables efficient blocking consumption:
+
+```rust
+// consume() uses live queries internally
+let message = queue.consume("tasks", None).await?;
+```
+
+When no messages are available, the consumer blocks efficiently without polling, receiving immediate notifications when new messages arrive.
+
+## Failed message handling
+
+Messages that fail processing are retried or moved to a failed queue:
+
+```rust
+let queue = BroccoliQueue::builder(url)
+    .retry_attempts(3)    // Retry up to 3 times
+    .retry_failed(true)   // Enable retry
+    .build()
+    .await?;
+```
+
+Failed messages are stored in a separate table with the original message and failure timestamp.
+
+## Data schema
+
+The SurrealDB broker uses these table structures:
+
+### Message table: `{queue_name}_messages`
+
+```surql
+CREATE {queue_name}_messages:task_id CONTENT {
+    id: {queue_name}_messages:task_id,
+    task_id: uuid,
+    payload: string,
+    attempts: int,
+};
+```
+
+### Queue table: `{queue_name}_queue`
+
+```surql
+CREATE {queue_name}_queue:[priority, timestamp, task_id] CONTENT {
+    id: [priority, timestamp, task_id],
+    message_id: {queue_name}_messages:task_id,
+    priority: int,
+    timestamp: datetime,
+};
+```
+
+### Processing table: `{queue_name}_processing`
+
+Tracks messages currently being processed.
+
+### Failed table: `{queue_name}_failed`
+
+Stores messages that exceeded retry attempts.
+
+## Transactions
+
+SurrealDB broker uses transactions for atomic operations:
+
+- **Consume**: Removes from queue and adds to processing in one transaction
+- **Acknowledge**: Removes from processing and deletes message atomically
+- **Reject**: Updates attempts and requeues or moves to failed
+
+## Auto-acknowledgment
+
+Enable auto-acknowledgment to automatically acknowledge successful messages:
+
+```rust
+use broccoli_queue::queue::ConsumeOptions;
+
+let options = ConsumeOptions {
+    auto_ack: Some(true),
+    ..Default::default()
+};
+
+queue.process_messages("tasks", Some(4), Some(options), |msg| async move {
+    // Message is auto-acknowledged on success
+    Ok(())
+}).await?;
+```
+
+## Cancel messages
+
+Remove messages from the queue before they're consumed:
+
+```rust
+// Cancel by task ID
+queue.cancel("tasks", "task-id-here".to_string()).await?;
+```
+
+## Limitations
+
+<Warning>
+  - The `size` operation is not implemented
+  - TTL for messages is not supported
+  - Scheduled messages lose subsecond precision (rounded to seconds)
+  - Fairness queues (disambiguators) are not supported
+  - No connection pooling
+</Warning>
+
+## Performance characteristics
+
+- **Consumption**: O(N log N) where N is the number of pending messages
+- **Live queries**: More efficient than polling for blocked consumers
+- **Batch operations**: Reduce transaction overhead with batch publishing and consumption
+- **Memory usage**: Lower than Redis for large message payloads
+
+## Storage backends
+
+SurrealDB supports multiple storage backends:
+
+```rust
+// In-memory (testing)
+"mem://?ns=test&db=test&username=root&password=root"
+
+// File-based
+"file://data.db?ns=prod&db=queue&username=admin&password=pass"
+
+// RocksDB
+"rocksdb://data?ns=prod&db=queue&username=admin&password=pass"
+
+// TiKV (distributed)
+"tikv://localhost:2379?ns=prod&db=queue&username=admin&password=pass"
+```
+
+## Use cases
+
+SurrealDB broker is ideal for:
+
+- Applications needing both a database and message queue
+- Systems requiring audit trails of message processing
+- Scenarios where message content needs to be queryable
+- Projects prioritizing simplicity over raw throughput
+
+## Comparison with other brokers
+
+| Feature | SurrealDB | Redis | RabbitMQ |
+|---------|-----------|-------|----------|
+| Live queries | Yes | No | No |
+| Batch consumption | Yes | No | No |
+| TTL support | No | Yes | Yes |
+| Fairness queues | No | Yes | No |
+| Size query | No | Yes | No |
+| Connection pool | No | Yes | Yes |
+| Integrated DB | Yes | No | No |
+
+## Next steps
+
+<CardGroup cols={2}>
+
+<Card title="Redis broker" icon="bolt" href="/brokers/redis">
+  Use Redis for high-performance queuing
+</Card>
+
+<Card title="RabbitMQ broker" icon="rabbit" href="/brokers/rabbitmq">
+  Use RabbitMQ for advanced messaging features
+</Card>
+
+</CardGroup>

@@ -1,0 +1,323 @@
+---
+title: Broker trait
+description: Low-level trait for implementing custom message brokers
+---
+
+The `Broker` trait defines the interface for message broker implementations. You typically don't need to interact with this trait directly, as `BroccoliQueue` provides a higher-level interface. However, if you're implementing a custom broker, you'll need to implement these methods.
+
+## Trait definition
+
+```rust
+#[async_trait::async_trait]
+pub trait Broker: Send + Sync {
+    async fn connect(&mut self, broker_url: &str) -> Result<(), BroccoliError>;
+    async fn publish(
+        &self,
+        queue_name: &str,
+        disambiguator: Option<String>,
+        message: &[InternalBrokerMessage],
+        options: Option<PublishOptions>,
+    ) -> Result<Vec<InternalBrokerMessage>, BroccoliError>;
+    async fn try_consume(
+        &self,
+        queue_name: &str,
+        options: Option<ConsumeOptions>,
+    ) -> Result<Option<InternalBrokerMessage>, BroccoliError>;
+    async fn try_consume_batch(
+        &self,
+        queue_name: &str,
+        batch_size: usize,
+        options: Option<ConsumeOptions>,
+    ) -> Result<Vec<InternalBrokerMessage>, BroccoliError>;
+    async fn consume(
+        &self,
+        queue_name: &str,
+        options: Option<ConsumeOptions>,
+    ) -> Result<InternalBrokerMessage, BroccoliError>;
+    async fn acknowledge(
+        &self,
+        queue_name: &str,
+        message: InternalBrokerMessage,
+    ) -> Result<(), BroccoliError>;
+    async fn reject(
+        &self,
+        queue_name: &str,
+        message: InternalBrokerMessage,
+    ) -> Result<(), BroccoliError>;
+    async fn cancel(
+        &self,
+        queue_name: &str,
+        message_id: String,
+    ) -> Result<(), BroccoliError>;
+    async fn size(
+        &self,
+        queue_name: &str,
+    ) -> Result<HashMap<String, u64>, BroccoliError>;
+}
+```
+
+## Methods
+
+### connect
+
+```rust
+async fn connect(&mut self, broker_url: &str) -> Result<(), BroccoliError>
+```
+
+Connects to the broker using the provided URL.
+
+<ParamField path="broker_url" type="&str" required>
+  The URL of the broker to connect to.
+</ParamField>
+
+<ResponseField name="Result" type="Result<(), BroccoliError>">
+  Returns `Ok(())` on successful connection or a `BroccoliError` on failure.
+</ResponseField>
+
+### publish
+
+```rust
+async fn publish(
+    &self,
+    queue_name: &str,
+    disambiguator: Option<String>,
+    message: &[InternalBrokerMessage],
+    options: Option<PublishOptions>,
+) -> Result<Vec<InternalBrokerMessage>, BroccoliError>
+```
+
+Publishes messages to the specified queue.
+
+<ParamField path="queue_name" type="&str" required>
+  The name of the queue.
+</ParamField>
+
+<ParamField path="disambiguator" type="Option<String>">
+  Optional disambiguator for fairness queues.
+</ParamField>
+
+<ParamField path="message" type="&[InternalBrokerMessage]" required>
+  Slice of messages to publish.
+</ParamField>
+
+<ParamField path="options" type="Option<PublishOptions>">
+  Optional publishing options.
+</ParamField>
+
+<ResponseField name="Vec<InternalBrokerMessage>" type="Result<Vec<InternalBrokerMessage>, BroccoliError>">
+  The published messages with updated metadata.
+</ResponseField>
+
+### consume
+
+```rust
+async fn consume(
+    &self,
+    queue_name: &str,
+    options: Option<ConsumeOptions>,
+) -> Result<InternalBrokerMessage, BroccoliError>
+```
+
+Consumes a message from the specified queue, blocking until a message is available.
+
+<ParamField path="queue_name" type="&str" required>
+  The name of the queue.
+</ParamField>
+
+<ParamField path="options" type="Option<ConsumeOptions>">
+  Optional consumption options.
+</ParamField>
+
+<ResponseField name="InternalBrokerMessage" type="Result<InternalBrokerMessage, BroccoliError>">
+  The consumed message.
+</ResponseField>
+
+### try_consume
+
+```rust
+async fn try_consume(
+    &self,
+    queue_name: &str,
+    options: Option<ConsumeOptions>,
+) -> Result<Option<InternalBrokerMessage>, BroccoliError>
+```
+
+Attempts to consume a message from the specified queue. Returns `None` if no message is available.
+
+<ParamField path="queue_name" type="&str" required>
+  The name of the queue.
+</ParamField>
+
+<ParamField path="options" type="Option<ConsumeOptions>">
+  Optional consumption options.
+</ParamField>
+
+<ResponseField name="Option<InternalBrokerMessage>" type="Result<Option<InternalBrokerMessage>, BroccoliError>">
+  `Some(message)` if available, or `None` if the queue is empty.
+</ResponseField>
+
+### try_consume_batch
+
+```rust
+async fn try_consume_batch(
+    &self,
+    queue_name: &str,
+    batch_size: usize,
+    options: Option<ConsumeOptions>,
+) -> Result<Vec<InternalBrokerMessage>, BroccoliError>
+```
+
+Attempts to consume up to `batch_size` messages from the specified queue. Returns immediately with whatever messages are available.
+
+<ParamField path="queue_name" type="&str" required>
+  The name of the queue.
+</ParamField>
+
+<ParamField path="batch_size" type="usize" required>
+  Maximum number of messages to consume.
+</ParamField>
+
+<ParamField path="options" type="Option<ConsumeOptions>">
+  Optional consumption options.
+</ParamField>
+
+<ResponseField name="Vec<InternalBrokerMessage>" type="Result<Vec<InternalBrokerMessage>, BroccoliError>">
+  A vector of available messages.
+</ResponseField>
+
+### acknowledge
+
+```rust
+async fn acknowledge(
+    &self,
+    queue_name: &str,
+    message: InternalBrokerMessage,
+) -> Result<(), BroccoliError>
+```
+
+Acknowledges the processing of a message, removing it from the processing queue.
+
+<ParamField path="queue_name" type="&str" required>
+  The name of the queue.
+</ParamField>
+
+<ParamField path="message" type="InternalBrokerMessage" required>
+  The message to acknowledge.
+</ParamField>
+
+<ResponseField name="Result" type="Result<(), BroccoliError>">
+  Returns `Ok(())` on success.
+</ResponseField>
+
+### reject
+
+```rust
+async fn reject(
+    &self,
+    queue_name: &str,
+    message: InternalBrokerMessage,
+) -> Result<(), BroccoliError>
+```
+
+Rejects a message, re-queuing it or moving it to a failed queue if the retry limit is reached.
+
+<ParamField path="queue_name" type="&str" required>
+  The name of the queue.
+</ParamField>
+
+<ParamField path="message" type="InternalBrokerMessage" required>
+  The message to reject.
+</ParamField>
+
+<ResponseField name="Result" type="Result<(), BroccoliError>">
+  Returns `Ok(())` on success.
+</ResponseField>
+
+### cancel
+
+```rust
+async fn cancel(
+    &self,
+    queue_name: &str,
+    message_id: String,
+) -> Result<(), BroccoliError>
+```
+
+Cancels a message, removing it from the processing queue entirely.
+
+<ParamField path="queue_name" type="&str" required>
+  The name of the queue.
+</ParamField>
+
+<ParamField path="message_id" type="String" required>
+  The ID of the message to cancel.
+</ParamField>
+
+<ResponseField name="Result" type="Result<(), BroccoliError>">
+  Returns `Ok(())` on success.
+</ResponseField>
+
+### size
+
+```rust
+async fn size(
+    &self,
+    queue_name: &str,
+) -> Result<HashMap<String, u64>, BroccoliError>
+```
+
+Returns the size of the queue(s).
+
+<ParamField path="queue_name" type="&str" required>
+  The name of the queue.
+</ParamField>
+
+<ResponseField name="HashMap<String, u64>" type="Result<HashMap<String, u64>, BroccoliError>">
+  A map of queue names to their sizes.
+</ResponseField>
+
+## BrokerConfig
+
+Configuration options for broker behavior.
+
+```rust
+pub struct BrokerConfig {
+    pub retry_attempts: Option<u8>,
+    pub retry_failed: Option<bool>,
+    pub pool_connections: Option<u8>,
+    pub enable_scheduling: Option<bool>,
+}
+```
+
+<ParamField path="retry_attempts" type="Option<u8>">
+  Maximum number of retry attempts for failed messages. Default is `3`.
+</ParamField>
+
+<ParamField path="retry_failed" type="Option<bool>">
+  Whether to retry failed messages. Default is `true`.
+</ParamField>
+
+<ParamField path="pool_connections" type="Option<u8>">
+  Number of connections to maintain in the connection pool. Default is `10`.
+</ParamField>
+
+<ParamField path="enable_scheduling" type="Option<bool>">
+  Whether to enable scheduling for messages. Default is `false`. For RabbitMQ, you need to install the delayed-exchange plugin.
+</ParamField>
+
+## BrokerType
+
+Enum representing supported message broker implementations.
+
+```rust
+pub enum BrokerType {
+    #[cfg(feature = "redis")]
+    Redis,
+    #[cfg(feature = "rabbitmq")]
+    RabbitMQ,
+    #[cfg(feature = "surrealdb")]
+    SurrealDB,
+}
+```
+
+The available broker types depend on which features are enabled in your `Cargo.toml`.

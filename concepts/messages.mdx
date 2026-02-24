@@ -1,0 +1,460 @@
+---
+title: Messages
+description: Learn about message structure, the BrokerMessage type, and how messages flow through Broccoli
+---
+
+Messages are the core data structures that flow through Broccoli. Understanding how messages are structured and processed is essential for building reliable message-driven applications.
+
+## BrokerMessage type
+
+The `BrokerMessage<T>` type wraps your payload with metadata needed for processing:
+
+```rust
+pub struct BrokerMessage<T: Clone> {
+    pub task_id: uuid::Uuid,
+    pub payload: T,
+    pub attempts: u8,
+    pub disambiguator: Option<String>,
+    pub(crate) metadata: Option<HashMap<String, MetadataTypes>>,
+}
+```
+
+### Fields
+
+#### task_id
+
+A unique identifier automatically generated for each message:
+
+```rust
+pub task_id: uuid::Uuid
+```
+
+This ID tracks the message throughout its lifecycle, useful for logging and debugging.
+
+#### payload
+
+Your actual message data:
+
+```rust
+pub payload: T
+```
+
+The payload type must implement `Clone + Serialize + DeserializeOwned`:
+
+```rust
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct JobPayload {
+    user_id: String,
+    action: String,
+}
+
+let message = BrokerMessage::new(
+    JobPayload {
+        user_id: "123".to_string(),
+        action: "process".to_string(),
+    },
+    None,
+);
+```
+
+#### attempts
+
+Tracks how many times processing has been attempted:
+
+```rust
+pub attempts: u8
+```
+
+Starts at 0 and increments each time the message is rejected and requeued. When attempts exceed the configured retry limit, the message moves to the failed queue.
+
+#### disambiguator
+
+Optional string for fairness queuing:
+
+```rust
+pub disambiguator: Option<String>
+```
+
+Messages with the same disambiguator are processed sequentially:
+
+```rust
+queue.publish("tasks", Some(user_id.clone()), &task, None).await?;
+```
+
+This ensures ordering guarantees for related messages.
+
+#### metadata
+
+Internal metadata used by broker implementations:
+
+```rust
+pub(crate) metadata: Option<HashMap<String, MetadataTypes>>
+```
+
+This field is internal and not exposed to user code.
+
+## Creating messages
+
+You rarely create `BrokerMessage` instances directly. The `publish` method handles this:
+
+```rust
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Task {
+    id: String,
+    name: String,
+}
+
+let task = Task {
+    id: "task-1".to_string(),
+    name: "Process order".to_string(),
+};
+
+// BrokerMessage is created automatically
+queue.publish("tasks", None, &task, None).await?;
+```
+
+If you need to create one manually:
+
+```rust
+let message = BrokerMessage::new(task, None);
+```
+
+## InternalBrokerMessage
+
+Internally, Broccoli uses `InternalBrokerMessage` to communicate with broker implementations:
+
+```rust
+pub struct InternalBrokerMessage {
+    pub task_id: String,
+    pub payload: String,
+    pub attempts: u8,
+    pub disambiguator: Option<String>,
+    pub(crate) metadata: Option<HashMap<String, MetadataTypes>>,
+}
+```
+
+This representation:
+- Serializes the payload to JSON
+- Converts the UUID to a string
+- Allows broker implementations to work with raw data
+
+Conversion happens automatically:
+
+```rust
+let internal: InternalBrokerMessage = broker_message.into();
+let typed: BrokerMessage<Task> = internal.into_message()?;
+```
+
+## Message lifecycle
+
+Messages move through several states during processing:
+
+```
+┌─────────┐
+│ Publish │
+└────┬────┘
+     |
+     v
+┌─────────────┐
+│   Pending   │
+└─────┬───────┘
+      |
+      v
+┌────────────────┐
+│  Processing    │
+└────┬────┬──────┘
+     |    |
+  Success Failure
+     |    |
+     v    v
+┌────┴────┴───┐  ┌──────────┐
+│ Acknowledged │  │ Rejected │
+└──────────────┘  └────┬─────┘
+                       |
+                  Retry available?
+                       |
+                  ┌────┴──────┐
+                  |           |
+                 Yes          No
+                  |           |
+                  v           v
+            ┌──────────┐  ┌────────┐
+            │ Requeued │  │ Failed │
+            └──────────┘  └────────┘
+```
+
+### Pending
+
+The message is in the queue waiting to be consumed.
+
+### Processing
+
+A consumer has received the message and is processing it. The message remains in a processing queue.
+
+### Acknowledged
+
+Processing succeeded. The message is removed from all queues.
+
+```rust
+let message = queue.consume::<Task>("tasks", None).await?;
+process_task(&message.payload).await?;
+queue.acknowledge("tasks", message).await?;
+```
+
+### Rejected
+
+Processing failed. The message is either requeued or moved to the failed queue:
+
+```rust
+let message = queue.consume::<Task>("tasks", None).await?;
+
+if let Err(e) = process_task(&message.payload).await {
+    queue.reject("tasks", message).await?;
+}
+```
+
+### Requeued
+
+The message has retry attempts remaining and is placed back in the pending queue with incremented `attempts`.
+
+### Failed
+
+The message has exhausted all retry attempts and is moved to a separate failed queue for manual intervention.
+
+## Publishing messages
+
+### Single message
+
+Publish one message at a time:
+
+```rust
+let message = queue.publish(
+    "tasks",              // Topic name
+    None,                 // No disambiguator
+    &task,                // Your payload
+    None,                 // No options
+).await?;
+
+println!("Published message: {}", message.task_id);
+```
+
+### Batch messages
+
+Publish multiple messages efficiently:
+
+```rust
+let tasks = vec![task1, task2, task3];
+
+let messages = queue.publish_batch(
+    "tasks",
+    None,
+    tasks,
+    None,
+).await?;
+
+println!("Published {} messages", messages.len());
+```
+
+### With options
+
+Customize publishing behavior:
+
+```rust
+use time::Duration;
+
+let options = PublishOptions::builder()
+    .priority(1)                        // Highest priority
+    .ttl(Duration::hours(24))          // Expire after 24 hours
+    .delay(Duration::minutes(5))       // Delay processing
+    .build();
+
+queue.publish("tasks", None, &task, Some(options)).await?;
+```
+
+## Consuming messages
+
+### Blocking consume
+
+Wait for a message to become available:
+
+```rust
+let message = queue.consume::<Task>("tasks", None).await?;
+println!("Received: {:?}", message.payload);
+```
+
+### Non-blocking consume
+
+Return immediately if no message is available:
+
+```rust
+if let Some(message) = queue.try_consume::<Task>("tasks", None).await? {
+    println!("Received: {:?}", message.payload);
+} else {
+    println!("No messages available");
+}
+```
+
+### Batch consume
+
+Consume multiple messages at once:
+
+```rust
+use time::Duration;
+
+let messages = queue.consume_batch::<Task>(
+    "tasks",
+    10,                          // Up to 10 messages
+    Duration::seconds(5),        // Wait up to 5 seconds
+    None,
+).await?;
+
+println!("Consumed {} messages", messages.len());
+```
+
+### With options
+
+Customize consumption behavior:
+
+```rust
+let options = ConsumeOptions::builder()
+    .auto_ack(false)           // Manual acknowledgment
+    .fairness(true)            // Enable fairness mode
+    .build();
+
+let message = queue.consume::<Task>("tasks", Some(options)).await?;
+```
+
+## Message processing
+
+The `process_messages` method handles the full message lifecycle:
+
+```rust
+queue.process_messages(
+    "tasks",
+    Some(5),  // 5 concurrent workers
+    None,
+    |message: BrokerMessage<Task>| async move {
+        println!("Processing: {}", message.task_id);
+        
+        // Your processing logic
+        process_task(&message.payload).await?;
+        
+        // Automatically acknowledged on success
+        Ok(())
+    },
+).await?;
+```
+
+This method:
+1. Consumes messages continuously
+2. Processes them with your handler
+3. Acknowledges on success
+4. Rejects on failure
+5. Manages concurrency
+
+### With custom handlers
+
+Handle success and failure separately:
+
+```rust
+queue.process_messages_with_handlers(
+    "tasks",
+    Some(5),
+    None,
+    // Process handler
+    |message: BrokerMessage<Task>| async move {
+        process_task(&message.payload).await
+    },
+    // Success handler
+    |message: BrokerMessage<Task>, result| async move {
+        println!("✓ Task {} completed", message.task_id);
+        Ok(())
+    },
+    // Error handler
+    |message: BrokerMessage<Task>, error| async move {
+        eprintln!("✗ Task {} failed: {}", message.task_id, error);
+        Ok(())
+    },
+).await?;
+```
+
+## Message serialization
+
+Broccoli uses `serde_json` for serialization. Your payload types must implement the required traits:
+
+```rust
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct MyMessage {
+    field1: String,
+    field2: i32,
+}
+```
+
+Serialization happens automatically:
+- When publishing, your payload is serialized to JSON
+- When consuming, JSON is deserialized to your type
+
+If deserialization fails, you'll get a `BroccoliError::Broker` error.
+
+## Best practices
+
+### Keep payloads small
+
+Large messages consume more memory and bandwidth. Consider storing large data separately and passing references:
+
+```rust
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Task {
+    id: String,
+    data_url: String,  // Reference to external data
+}
+```
+
+### Use typed messages
+
+Create distinct types for different message kinds:
+
+```rust
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+enum TaskType {
+    ProcessOrder { order_id: String },
+    SendEmail { to: String, subject: String },
+    GenerateReport { report_id: String },
+}
+```
+
+### Include correlation IDs
+
+Add fields to trace related messages:
+
+```rust
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Task {
+    correlation_id: String,
+    // ... other fields
+}
+```
+
+### Handle deserialization errors
+
+If your message schema evolves, old messages might fail to deserialize. Consider:
+
+```rust
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Task {
+    id: String,
+    #[serde(default)]  // Provide default for new fields
+    priority: u8,
+}
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Error Handling" icon="triangle-exclamation" href="/concepts/error-handling">
+    Handle errors in message processing
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/concepts/architecture">
+    Understand the system architecture
+  </Card>
+</CardGroup>

@@ -1,0 +1,127 @@
+---
+title: Introduction
+description: A robust message queue system for Rust applications, designed as a Rust alternative to Celery
+---
+
+<img
+  className="block dark:hidden"
+  src="/images/hero-light.svg"
+  alt="Broccoli Hero Light"
+/>
+<img
+  className="hidden dark:block"
+  src="/images/hero-dark.svg"
+  alt="Broccoli Hero Dark"
+/>
+
+## Welcome to Broccoli
+
+Broccoli is a robust message queue system for Rust applications, designed as a Rust alternative to [Celery](https://docs.celeryq.dev/en/stable/getting-started/introduction.html). If you're familiar with Celery but want to leverage Rust's performance and type safety, Broccoli is your answer.
+
+<Note>
+  Broccoli is actively under development. We're working hard to make it production-ready and would love your feedback and contributions!
+</Note>
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card
+    title="Asynchronous processing"
+    icon="bolt"
+  >
+    Built on Tokio for high-performance async message handling
+  </Card>
+  <Card
+    title="Multiple brokers"
+    icon="server"
+  >
+    Redis support with RabbitMQ and Kafka coming soon
+  </Card>
+  <Card
+    title="Type-safe messages"
+    icon="shield-check"
+  >
+    Leverage Rust's type system for compile-time message validation
+  </Card>
+  <Card
+    title="Flexible retry strategies"
+    icon="rotate"
+  >
+    Configurable retry attempts and failed message handling
+  </Card>
+  <Card
+    title="Connection pooling"
+    icon="diagram-project"
+  >
+    Efficient connection management for optimal performance
+  </Card>
+  <Card
+    title="Custom error handlers"
+    icon="bug"
+  >
+    Fine-grained control over success and error handling
+  </Card>
+</CardGroup>
+
+## Supported brokers
+
+Broccoli supports multiple message brokers to fit your infrastructure needs:
+
+- **Redis** (Current) - Fast, in-memory message broker
+- **RabbitMQ** (Available) - Enterprise-grade message broker
+- **Kafka** (Planned) - Distributed streaming platform
+- **SurrealDB** (Experimental) - Multi-model database with queue support
+
+## Get started
+
+<CardGroup cols={2}>
+  <Card
+    title="Installation"
+    icon="download"
+    href="/installation"
+  >
+    Add Broccoli to your Rust project with Cargo
+  </Card>
+  <Card
+    title="Quickstart"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Build your first producer and consumer in minutes
+  </Card>
+  <Card
+    title="API reference"
+    icon="code"
+    href="https://docs.rs/broccoli_queue"
+  >
+    Explore the complete API documentation
+  </Card>
+  <Card
+    title="GitHub"
+    icon="github"
+    href="https://github.com/densumesh/broccoli"
+  >
+    View source code and contribute to the project
+  </Card>
+</CardGroup>
+
+## Why Broccoli?
+
+Broccoli brings the simplicity and flexibility of Celery to the Rust ecosystem:
+
+- **Performance** - Rust's zero-cost abstractions and memory safety without garbage collection
+- **Type safety** - Catch errors at compile time with strongly typed messages
+- **Async-first** - Built on Tokio for efficient concurrent message processing
+- **Flexible** - Support for multiple brokers with a consistent API
+- **Production-ready** - Connection pooling, retry strategies, and error handling built-in
+
+## Community and support
+
+Broccoli is an open-source project and we welcome contributions:
+
+- Report issues on [GitHub](https://github.com/densumesh/broccoli/issues)
+- Contribute new broker implementations
+- Improve documentation
+- Share your use cases and feedback
+
+Let's build something great together!

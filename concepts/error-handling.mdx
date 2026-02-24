@@ -1,0 +1,588 @@
+---
+title: Error Handling
+description: Learn how to handle errors in Broccoli with BroccoliError and recovery strategies
+---
+
+Broccoli provides comprehensive error handling through the `BroccoliError` type. Understanding how to handle errors properly ensures your message processing is reliable and resilient.
+
+## BroccoliError type
+
+All Broccoli operations return `Result<T, BroccoliError>`. The error enum categorizes failures by their source:
+
+```rust
+pub enum BroccoliError {
+    Broker(String),
+    BrokerNonIdempotentOp(String),
+    BrokerNonIdempotentRetriableOp(String),
+    Publish(String),
+    Consume(String),
+    Acknowledge(String),
+    Reject(String),
+    Cancel(String),
+    GetMessagePosition(String),
+    Serialization(#[from] serde_json::Error),
+    Redis(#[from] redis::RedisError),
+    SurrealDB(#[from] surrealdb::Error),
+    Job(String),
+    QueueStatus(String),
+    ConnectionTimeout(u32),
+    NotImplemented,
+}
+```
+
+## Error variants
+
+### Broker
+
+General broker-level errors, including connection failures and configuration issues:
+
+```rust
+BroccoliError::Broker(String)
+```
+
+**Common causes:**
+- Failed to connect to broker
+- Invalid broker URL
+- Connection pool initialization errors
+- Unsupported broker URL scheme
+
+**Example:**
+```rust
+match queue.publish("tasks", None, &task, None).await {
+    Err(BroccoliError::Broker(msg)) => {
+        eprintln!("Broker error: {}", msg);
+        // Retry connection or alert monitoring
+    }
+    Ok(message) => println!("Published: {}", message.task_id),
+    Err(e) => eprintln!("Other error: {}", e),
+}
+```
+
+### BrokerNonIdempotentOp
+
+Occurs when concurrent operations conflict in a non-idempotent way, primarily with SurrealDB:
+
+```rust
+BroccoliError::BrokerNonIdempotentOp(String)
+```
+
+**Common causes:**
+- Multiple concurrent reads on the same SurrealDB topic
+- Race conditions in message consumption
+
+**Example:**
+```rust
+match queue.consume::<Task>("tasks", None).await {
+    Err(BroccoliError::BrokerNonIdempotentOp(msg)) => {
+        log::error!("Concurrency conflict: {}", msg);
+        // Don't retry - use lower concurrency
+    }
+    Ok(message) => process_message(message).await?,
+    Err(e) => return Err(e),
+}
+```
+
+<Warning>
+When using SurrealDB, limit concurrency to avoid non-idempotent operation errors.
+</Warning>
+
+### BrokerNonIdempotentRetriableOp
+
+Similar to `BrokerNonIdempotentOp`, but the operation can be safely retried:
+
+```rust
+BroccoliError::BrokerNonIdempotentRetriableOp(String)
+```
+
+**Common causes:**
+- Multiple concurrent writes to the same SurrealDB table
+- Transient conflicts that may resolve
+
+**Example:**
+```rust
+let mut retries = 0;
+loop {
+    match queue.publish("tasks", None, &task, None).await {
+        Err(BroccoliError::BrokerNonIdempotentRetriableOp(msg)) if retries < 3 => {
+            retries += 1;
+            tokio::time::sleep(Duration::from_millis(100 * retries)).await;
+            continue;
+        }
+        result => break result,
+    }
+}
+```
+
+### Publish
+
+Errors during message publishing:
+
+```rust
+BroccoliError::Publish(String)
+```
+
+**Common causes:**
+- Serialization failures
+- Broker unavailable
+- Queue full or quota exceeded
+
+**Example:**
+```rust
+match queue.publish("tasks", None, &task, None).await {
+    Err(BroccoliError::Publish(msg)) => {
+        eprintln!("Failed to publish: {}", msg);
+        // Store message locally and retry later
+        save_for_retry(&task)?;
+    }
+    Ok(message) => println!("Published: {}", message.task_id),
+    Err(e) => return Err(e),
+}
+```
+
+### Consume
+
+Errors during message consumption:
+
+```rust
+BroccoliError::Consume(String)
+```
+
+**Common causes:**
+- Deserialization failures
+- Broker unavailable
+- Malformed message data
+
+**Example:**
+```rust
+match queue.consume::<Task>("tasks", None).await {
+    Err(BroccoliError::Consume(msg)) => {
+        eprintln!("Failed to consume: {}", msg);
+        // Wait before retrying
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    Ok(message) => process_message(message).await?,
+    Err(e) => return Err(e),
+}
+```
+
+### Acknowledge
+
+Errors when acknowledging message processing:
+
+```rust
+BroccoliError::Acknowledge(String)
+```
+
+**Common causes:**
+- Message already acknowledged
+- Auto-ack enabled but manual ack attempted
+- Broker connection lost
+
+**Example:**
+```rust
+let message = queue.consume::<Task>("tasks", None).await?;
+process_task(&message.payload).await?;
+
+match queue.acknowledge("tasks", message).await {
+    Err(BroccoliError::Acknowledge(msg)) => {
+        log::warn!("Acknowledge failed: {}", msg);
+        // Message may be reprocessed
+    }
+    Ok(()) => println!("Acknowledged successfully"),
+    Err(e) => return Err(e),
+}
+```
+
+### Reject
+
+Errors when rejecting message processing:
+
+```rust
+BroccoliError::Reject(String)
+```
+
+**Common causes:**
+- Message already acknowledged or rejected
+- Broker connection lost
+
+**Example:**
+```rust
+let message = queue.consume::<Task>("tasks", None).await?;
+
+if let Err(e) = process_task(&message.payload).await {
+    match queue.reject("tasks", message).await {
+        Err(BroccoliError::Reject(msg)) => {
+            log::error!("Failed to reject message: {}", msg);
+            // Message may be lost
+        }
+        Ok(()) => println!("Message rejected for retry"),
+        Err(e) => return Err(e),
+    }
+}
+```
+
+### Cancel
+
+Errors when canceling a scheduled message:
+
+```rust
+BroccoliError::Cancel(String)
+```
+
+**Example:**
+```rust
+match queue.cancel("tasks", message_id).await {
+    Err(BroccoliError::Cancel(msg)) => {
+        eprintln!("Failed to cancel: {}", msg);
+    }
+    Ok(()) => println!("Message canceled"),
+    Err(e) => return Err(e),
+}
+```
+
+### Serialization
+
+JSON serialization or deserialization errors:
+
+```rust
+BroccoliError::Serialization(serde_json::Error)
+```
+
+**Common causes:**
+- Missing required fields
+- Type mismatches
+- Invalid JSON in queue
+
+**Example:**
+```rust
+match queue.consume::<Task>("tasks", None).await {
+    Err(BroccoliError::Serialization(e)) => {
+        eprintln!("Deserialization failed: {}", e);
+        // Move to dead letter queue
+        move_to_dead_letter(&message_id)?;
+    }
+    Ok(message) => process_message(message).await?,
+    Err(e) => return Err(e),
+}
+```
+
+### Broker-specific errors
+
+Errors from the underlying broker implementation:
+
+```rust
+#[cfg(feature = "redis")]
+BroccoliError::Redis(redis::RedisError)
+
+#[cfg(feature = "surrealdb")]
+BroccoliError::SurrealDB(surrealdb::Error)
+```
+
+**Example:**
+```rust
+#[cfg(feature = "redis")]
+match queue.publish("tasks", None, &task, None).await {
+    Err(BroccoliError::Redis(e)) => {
+        eprintln!("Redis error: {}", e);
+        // Handle Redis-specific issues
+    }
+    Ok(message) => println!("Published: {}", message.task_id),
+    Err(e) => return Err(e),
+}
+```
+
+### ConnectionTimeout
+
+Connection to broker timed out after retries:
+
+```rust
+BroccoliError::ConnectionTimeout(u32)  // Number of retry attempts
+```
+
+**Example:**
+```rust
+match BroccoliQueue::builder("redis://localhost:6379").build().await {
+    Err(BroccoliError::ConnectionTimeout(retries)) => {
+        eprintln!("Connection timed out after {} retries", retries);
+        // Fallback to alternative broker or fail fast
+    }
+    Ok(queue) => println!("Connected successfully"),
+    Err(e) => return Err(e),
+}
+```
+
+### NotImplemented
+
+Feature not implemented for the current broker:
+
+```rust
+BroccoliError::NotImplemented
+```
+
+**Common causes:**
+- Getting message position in RabbitMQ
+- Broker-specific features not supported
+
+**Example:**
+```rust
+match queue.get_message_position("tasks", message_id).await {
+    Err(BroccoliError::NotImplemented) => {
+        println!("Feature not available for this broker");
+    }
+    Ok(position) => println!("Position: {}", position),
+    Err(e) => return Err(e),
+}
+```
+
+## Error handling strategies
+
+### Retry with backoff
+
+Retry transient errors with exponential backoff:
+
+```rust
+use tokio::time::{sleep, Duration};
+
+async fn publish_with_retry<T>(
+    queue: &BroccoliQueue,
+    topic: &str,
+    message: &T,
+) -> Result<BrokerMessage<T>, BroccoliError>
+where
+    T: Clone + serde::Serialize + serde::de::DeserializeOwned,
+{
+    let mut retries = 0;
+    let max_retries = 5;
+    
+    loop {
+        match queue.publish(topic, None, message, None).await {
+            Ok(msg) => return Ok(msg),
+            Err(e) if retries < max_retries && is_retriable(&e) => {
+                retries += 1;
+                let delay = Duration::from_millis(100 * 2_u64.pow(retries));
+                log::warn!("Retry {} after {:?}: {}", retries, delay, e);
+                sleep(delay).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn is_retriable(error: &BroccoliError) -> bool {
+    matches!(
+        error,
+        BroccoliError::Broker(_)
+            | BroccoliError::Publish(_)
+            | BroccoliError::Consume(_)
+            | BroccoliError::BrokerNonIdempotentRetriableOp(_)
+    )
+}
+```
+
+### Circuit breaker
+
+Prevent cascading failures with a circuit breaker:
+
+```rust
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
+struct CircuitBreaker {
+    failures: Arc<AtomicU32>,
+    threshold: u32,
+}
+
+impl CircuitBreaker {
+    fn new(threshold: u32) -> Self {
+        Self {
+            failures: Arc::new(AtomicU32::new(0)),
+            threshold,
+        }
+    }
+    
+    fn is_open(&self) -> bool {
+        self.failures.load(Ordering::Relaxed) >= self.threshold
+    }
+    
+    fn record_failure(&self) {
+        self.failures.fetch_add(1, Ordering::Relaxed);
+    }
+    
+    fn reset(&self) {
+        self.failures.store(0, Ordering::Relaxed);
+    }
+}
+
+async fn publish_with_circuit_breaker<T>(
+    queue: &BroccoliQueue,
+    topic: &str,
+    message: &T,
+    breaker: &CircuitBreaker,
+) -> Result<BrokerMessage<T>, BroccoliError>
+where
+    T: Clone + serde::Serialize + serde::de::DeserializeOwned,
+{
+    if breaker.is_open() {
+        return Err(BroccoliError::Broker(
+            "Circuit breaker open".to_string()
+        ));
+    }
+    
+    match queue.publish(topic, None, message, None).await {
+        Ok(msg) => {
+            breaker.reset();
+            Ok(msg)
+        }
+        Err(e) => {
+            breaker.record_failure();
+            Err(e)
+        }
+    }
+}
+```
+
+### Dead letter queue
+
+Move permanently failed messages to a dead letter queue:
+
+```rust
+async fn process_with_dlq(
+    queue: &BroccoliQueue,
+    message: BrokerMessage<Task>,
+) -> Result<(), BroccoliError> {
+    match process_task(&message.payload).await {
+        Ok(()) => {
+            queue.acknowledge("tasks", message).await?;
+            Ok(())
+        }
+        Err(e) if message.attempts >= 3 => {
+            // Too many failures - move to DLQ
+            queue.publish(
+                "tasks_dlq",
+                None,
+                &message.payload,
+                None,
+            ).await?;
+            queue.acknowledge("tasks", message).await?;
+            log::error!("Moved to DLQ after {} attempts: {}", message.attempts, e);
+            Ok(())
+        }
+        Err(e) => {
+            // Reject for retry
+            queue.reject("tasks", message).await?;
+            Err(BroccoliError::Job(e.to_string()))
+        }
+    }
+}
+```
+
+### Graceful degradation
+
+Fall back to alternative strategies when the broker is unavailable:
+
+```rust
+async fn publish_or_fallback<T>(
+    queue: &BroccoliQueue,
+    topic: &str,
+    message: &T,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    T: Clone + serde::Serialize + serde::de::DeserializeOwned,
+{
+    match queue.publish(topic, None, message, None).await {
+        Ok(_) => Ok(()),
+        Err(BroccoliError::Broker(_)) | Err(BroccoliError::Publish(_)) => {
+            // Broker unavailable - save locally
+            log::warn!("Broker unavailable, saving to disk");
+            save_to_disk(topic, message)?;
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+```
+
+## Best practices
+
+### Log all errors
+
+Always log errors with context:
+
+```rust
+match queue.publish("tasks", None, &task, None).await {
+    Err(e) => {
+        log::error!(
+            "Failed to publish task {} to {}: {}",
+            task.id,
+            "tasks",
+            e
+        );
+        return Err(e);
+    }
+    Ok(message) => log::info!("Published task {}", message.task_id),
+}
+```
+
+### Use structured errors
+
+Wrap errors with additional context:
+
+```rust
+queue.publish("tasks", None, &task, None)
+    .await
+    .map_err(|e| {
+        format!("Failed to publish task {} to queue: {}", task.id, e)
+    })?;
+```
+
+### Handle errors at the right level
+
+Decide where to handle errors based on their nature:
+- Transient errors: Retry at the call site
+- Configuration errors: Handle during initialization
+- Processing errors: Handle in message handlers
+
+### Monitor error rates
+
+Track error rates to detect issues:
+
+```rust
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static ERROR_COUNT: AtomicU64 = AtomicU64::new(0);
+
+match queue.publish("tasks", None, &task, None).await {
+    Err(e) => {
+        ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+        log::error!("Publish error: {}", e);
+        return Err(e);
+    }
+    Ok(message) => Ok(message),
+}
+```
+
+### Test error scenarios
+
+Write tests for error handling paths:
+
+```rust
+#[tokio::test]
+async fn test_publish_error_handling() {
+    let queue = BroccoliQueue::builder("redis://invalid:9999")
+        .build()
+        .await;
+    
+    assert!(matches!(queue, Err(BroccoliError::Broker(_))));
+}
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="diagram-project" href="/concepts/architecture">
+    Understand the system architecture
+  </Card>
+  <Card title="Brokers" icon="server" href="/concepts/brokers">
+    Learn about broker implementations
+  </Card>
+</CardGroup>

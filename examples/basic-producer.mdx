@@ -1,0 +1,245 @@
+---
+title: Basic producer
+description: Learn how to publish messages to a Broccoli queue
+---
+
+This guide shows you how to create a basic message producer that publishes jobs to a queue. You'll learn how to connect to a broker, publish individual messages, and publish messages in batches.
+
+## Prerequisites
+
+Add Broccoli to your `Cargo.toml` with at least one broker feature:
+
+```toml
+[dependencies]
+broccoli-queue = { version = "0.1", features = ["redis"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+chrono = "0.4"
+time = "0.3"
+```
+
+## Define your message payload
+
+Start by defining the data structure for your messages. Broccoli serializes messages using serde, so your types must implement `Serialize` and `Deserialize`.
+
+```rust
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+    parameters: Parameters,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Parameters {
+    input_data: String,
+    priority: u8,
+    timeout_seconds: u32,
+}
+```
+
+## Connect to a broker
+
+Initialize a queue connection using the builder pattern. You can configure retry strategies and connection pooling:
+
+```rust
+use broccoli_queue::{error::BroccoliError, queue::BroccoliQueue};
+
+#[tokio::main]
+async fn main() -> Result<(), BroccoliError> {
+    let queue = BroccoliQueue::builder("redis://localhost:6380")
+        .failed_message_retry_strategy(Default::default())
+        .pool_connections(5)
+        .build()
+        .await?;
+
+    Ok(())
+}
+```
+
+<Note>
+You can use different broker URLs depending on your backend:
+- Redis: `redis://localhost:6380`
+- RabbitMQ: `amqp://localhost:5672`
+- SurrealDB: `ws://localhost:8000`
+</Note>
+
+## Publish a single message
+
+Publish a message to a queue by calling `publish()` with the queue name and payload:
+
+```rust
+let job = JobPayload {
+    id: "job-1".to_string(),
+    task_name: "process_data".to_string(),
+    parameters: Parameters {
+        input_data: "data-1".to_string(),
+        priority: 1,
+        timeout_seconds: 300,
+    },
+    created_at: chrono::Utc::now(),
+};
+
+let published = queue
+    .publish("jobs", None, &job, None)
+    .await?;
+
+println!("Published job with ID: {}", published.task_id);
+```
+
+## Publish messages in batches
+
+For better performance when publishing multiple messages, use `publish_batch()`:
+
+```rust
+use time::Duration;
+use broccoli_queue::queue::PublishOptions;
+
+let jobs = vec![
+    JobPayload {
+        id: "job-1".to_string(),
+        task_name: "process_data".to_string(),
+        parameters: Parameters {
+            input_data: "data-1".to_string(),
+            priority: 1,
+            timeout_seconds: 300,
+        },
+        created_at: chrono::Utc::now(),
+    },
+    JobPayload {
+        id: "job-2".to_string(),
+        task_name: "generate_report".to_string(),
+        parameters: Parameters {
+            input_data: "data-2".to_string(),
+            priority: 2,
+            timeout_seconds: 600,
+        },
+        created_at: chrono::Utc::now(),
+    },
+];
+
+let published_jobs = queue
+    .publish_batch("jobs", None, jobs, None)
+    .await?;
+
+println!("Published {} jobs", published_jobs.len());
+```
+
+## Publish with options
+
+You can configure message behavior using `PublishOptions`:
+
+```rust
+let options = PublishOptions {
+    delay: Some(Duration::seconds(10)),
+    scheduled_at: None,
+    ttl: None,
+    priority: None,
+};
+
+let delayed_jobs = queue
+    .publish_batch("jobs", None, jobs, Some(options))
+    .await?;
+```
+
+<Note>
+Delayed messages are published after the specified delay. This is useful for implementing retry logic or scheduled tasks.
+</Note>
+
+## Complete example
+
+Here's a complete working example that demonstrates both immediate and delayed publishing:
+
+```rust
+use broccoli_queue::{
+    error::BroccoliError,
+    queue::{BroccoliQueue, PublishOptions},
+};
+use serde::{Deserialize, Serialize};
+use time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+    parameters: Parameters,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Parameters {
+    input_data: String,
+    priority: u8,
+    timeout_seconds: u32,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), BroccoliError> {
+    let queue = BroccoliQueue::builder("redis://localhost:6380")
+        .failed_message_retry_strategy(Default::default())
+        .pool_connections(5)
+        .build()
+        .await?;
+
+    // Publish immediate jobs
+    let immediate_jobs = vec![
+        JobPayload {
+            id: "job-1".to_string(),
+            task_name: "process_data".to_string(),
+            parameters: Parameters {
+                input_data: "data-1".to_string(),
+                priority: 1,
+                timeout_seconds: 300,
+            },
+            created_at: chrono::Utc::now(),
+        },
+    ];
+
+    let published = queue
+        .publish_batch("jobs", None, immediate_jobs, None)
+        .await?;
+
+    println!("Published {} immediate jobs", published.len());
+
+    // Publish delayed jobs
+    let delayed_jobs = vec![
+        JobPayload {
+            id: "job-2".to_string(),
+            task_name: "generate_report".to_string(),
+            parameters: Parameters {
+                input_data: "data-2".to_string(),
+                priority: 2,
+                timeout_seconds: 600,
+            },
+            created_at: chrono::Utc::now(),
+        },
+    ];
+
+    let scheduled = queue
+        .publish_batch(
+            "jobs",
+            None,
+            delayed_jobs,
+            Some(PublishOptions {
+                delay: Some(Duration::seconds(10)),
+                scheduled_at: None,
+                ttl: None,
+                priority: None,
+            }),
+        )
+        .await?;
+
+    println!("Published {} delayed jobs", scheduled.len());
+
+    Ok(())
+}
+```
+
+## Next steps
+
+- Learn how to [consume messages](/examples/basic-consumer)
+- Explore [advanced patterns](/examples/advanced-patterns)
+- Configure [retry strategies](/guides/retry-strategies)

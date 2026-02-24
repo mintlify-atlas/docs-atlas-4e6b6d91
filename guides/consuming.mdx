@@ -1,0 +1,209 @@
+---
+title: Consuming messages
+description: Learn how to consume and process messages from Broccoli queues with various consumption patterns
+---
+
+Broccoli provides flexible ways to consume messages from queues, including blocking consumption, non-blocking attempts, and automated message processing with handlers.
+
+## Basic consumption
+
+The `consume` method blocks until a message is available:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+}
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .build()
+    .await?;
+
+// Consume a single message (blocks until available)
+let message = queue.consume::<JobPayload>("jobs", None).await?;
+println!("Received: {:?}", message.payload);
+
+// Process the message
+// ...
+
+// Acknowledge successful processing
+queue.acknowledge("jobs", message).await?;
+```
+
+<Warning>
+Messages must be manually acknowledged or rejected. Failing to do so will leave them in the processing queue.
+</Warning>
+
+## Non-blocking consumption
+
+Use `try_consume` to check for messages without blocking:
+
+```rust
+match queue.try_consume::<JobPayload>("jobs", None).await? {
+    Some(message) => {
+        println!("Got message: {:?}", message.payload);
+        queue.acknowledge("jobs", message).await?;
+    }
+    None => println!("No messages available"),
+}
+```
+
+## Consume options
+
+Configure consumption behavior with `ConsumeOptions`:
+
+<Steps>
+
+### Auto-acknowledgment
+
+Automatically acknowledge messages upon consumption:
+
+```rust
+use broccoli_queue::queue::ConsumeOptions;
+
+let options = ConsumeOptions::builder()
+    .auto_ack(true)
+    .build();
+
+let message = queue.consume::<JobPayload>("jobs", Some(options)).await?;
+// Message is automatically acknowledged
+```
+
+<Warning>
+With auto-acknowledgment enabled, you cannot manually call `acknowledge()` or `reject()`. The message is immediately removed from the queue.
+</Warning>
+
+### Fairness queues
+
+Enable fairness mode for round-robin consumption across disambiguators:
+
+```rust
+let options = ConsumeOptions::builder()
+    .fairness(true)
+    .build();
+
+let message = queue.consume::<JobPayload>("jobs", Some(options)).await?;
+```
+
+<Note>
+Fairness queues are only supported by the Redis broker.
+</Note>
+
+### Handler acknowledgment control
+
+Control whether messages are acknowledged after handler execution:
+
+```rust
+let options = ConsumeOptions::builder()
+    .handler_ack(false) // Don't auto-acknowledge after handler
+    .build();
+```
+
+</Steps>
+
+## Processing messages with handlers
+
+The `process_messages` method automatically consumes and processes messages in a loop:
+
+```rust
+use broccoli_queue::error::BroccoliError;
+
+queue.process_messages(
+    "jobs",
+    Some(4), // 4 concurrent workers
+    None,
+    |message| async move {
+        println!("Processing: {:?}", message.payload);
+        
+        // Your processing logic here
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        
+        Ok(()) // Success
+    },
+).await?;
+```
+
+<Tip>
+Messages are automatically acknowledged on success and rejected on error when using `process_messages`.
+</Tip>
+
+## Advanced handler patterns
+
+Use `process_messages_with_handlers` for fine-grained control:
+
+```rust
+async fn process_job(message: BrokerMessage<JobPayload>) -> Result<(), BroccoliError> {
+    println!("Processing job: {}", message.payload.id);
+    // Processing logic
+    Ok(())
+}
+
+async fn on_success(message: BrokerMessage<JobPayload>, _result: ()) -> Result<(), BroccoliError> {
+    println!("Successfully processed: {}", message.task_id);
+    Ok(())
+}
+
+async fn on_error(message: BrokerMessage<JobPayload>, error: BroccoliError) -> Result<(), BroccoliError> {
+    eprintln!("Failed to process {}: {:?}", message.task_id, error);
+    Ok(())
+}
+
+queue.process_messages_with_handlers(
+    "jobs",
+    Some(3), // 3 concurrent workers
+    None,
+    process_job,
+    on_success,
+    on_error,
+).await?;
+```
+
+## Message acknowledgment
+
+You have three options for handling consumed messages:
+
+<CodeGroup>
+
+```rust Acknowledge
+// Mark message as successfully processed
+queue.acknowledge("jobs", message).await?;
+```
+
+```rust Reject
+// Move message to failed queue or retry
+queue.reject("jobs", message).await?;
+```
+
+```rust Cancel
+// Delete message from queue entirely
+queue.cancel("jobs", message.task_id.to_string()).await?;
+```
+
+</CodeGroup>
+
+## Concurrency control
+
+Control how many messages are processed concurrently:
+
+```rust
+// Process messages sequentially (no concurrency)
+queue.process_messages("jobs", None, None, handler).await?;
+
+// Process with 10 concurrent workers
+queue.process_messages("jobs", Some(10), None, handler).await?;
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Batch operations" icon="layer-group" href="/guides/batch-operations">
+    Consume multiple messages at once
+  </Card>
+  <Card title="Retry strategies" icon="rotate" href="/guides/retry-strategies">
+    Configure how failed messages are handled
+  </Card>
+</CardGroup>

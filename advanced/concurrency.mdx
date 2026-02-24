@@ -1,0 +1,413 @@
+---
+title: Concurrency patterns
+description: Configure worker concurrency and process messages efficiently in parallel
+---
+
+Broccoli provides flexible concurrency options to help you process messages efficiently. You can configure the number of concurrent workers, control how messages are acknowledged, and tune processing behavior.
+
+## Basic concurrent processing
+
+The `process_messages` method accepts an optional concurrency parameter that controls how many messages are processed simultaneously:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use broccoli_queue::brokers::broker::BrokerMessage;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(10)
+        .build()
+        .await?;
+
+    // Process with 5 concurrent workers
+    queue.process_messages(
+        "jobs",
+        Some(5), // concurrency level
+        None,
+        |message: BrokerMessage<JobPayload>| async move {
+            println!("Processing job: {}", message.payload.id);
+            // Simulate work
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            Ok(())
+        }
+    ).await?;
+    
+    Ok(())
+}
+```
+
+## Concurrency levels
+
+<Steps>
+  <Step title="No concurrency (None)">
+    Process messages sequentially in a single task. Use this for simple workloads or when message order matters.
+  </Step>
+  
+  <Step title="Low concurrency (2-5)">
+    Good for I/O-bound tasks with moderate throughput requirements. Limits resource usage.
+  </Step>
+  
+  <Step title="High concurrency (10-50)">
+    Suitable for high-throughput scenarios with many short-lived tasks. Requires adequate connection pool size.
+  </Step>
+  
+  <Step title="Very high concurrency (50+)">
+    For maximum throughput with lightweight async operations. Monitor system resources carefully.
+  </Step>
+</Steps>
+
+<Warning>
+  The concurrency level determines how many Tokio tasks are spawned. Each task runs an independent message processing loop. Ensure your connection pool size is sufficient for your concurrency level.
+</Warning>
+
+## Connection pool configuration
+
+The connection pool size should match or exceed your concurrency level:
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(20) // Support up to 20 concurrent workers
+    .build()
+    .await?;
+
+queue.process_messages(
+    "jobs",
+    Some(20), // Match pool size
+    None,
+    |message: BrokerMessage<JobPayload>| async move {
+        // Process message
+        Ok(())
+    }
+).await?;
+```
+
+<Tip>
+  Set `pool_connections` to at least your concurrency level. If you have multiple queues running concurrently, multiply accordingly.
+</Tip>
+
+## Sequential processing
+
+Omit the concurrency parameter (or pass `None`) for sequential processing:
+
+```rust
+// Process one message at a time
+queue.process_messages(
+    "critical_orders",
+    None, // sequential processing
+    None,
+    |message: BrokerMessage<JobPayload>| async move {
+        // Messages processed in order
+        process_order(message.payload).await?;
+        Ok(())
+    }
+).await?;
+```
+
+Sequential processing is useful when:
+- Message order is important
+- Resources are limited
+- Debugging issues
+- Testing message handlers
+
+## Advanced handler configuration
+
+Use `process_messages_with_handlers` for more control over message lifecycle:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use broccoli_queue::brokers::broker::BrokerMessage;
+use broccoli_queue::error::BroccoliError;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+}
+
+async fn process_message(
+    message: BrokerMessage<JobPayload>
+) -> Result<String, BroccoliError> {
+    println!("Processing message: {:?}", message.payload.id);
+    // Return a result from processing
+    Ok(format!("Completed {}", message.payload.id))
+}
+
+async fn on_success(
+    message: BrokerMessage<JobPayload>,
+    result: String
+) -> Result<(), BroccoliError> {
+    println!("Successfully processed {}: {}", message.task_id, result);
+    // Log to database, send notification, etc.
+    Ok(())
+}
+
+async fn on_error(
+    message: BrokerMessage<JobPayload>,
+    error: BroccoliError
+) -> Result<(), BroccoliError> {
+    eprintln!("Failed to process {}: {:?}", message.task_id, error);
+    // Send alert, log error, etc.
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(10)
+        .build()
+        .await?;
+
+    queue.process_messages_with_handlers(
+        "jobs",
+        Some(3), // 3 concurrent workers
+        None,
+        process_message,
+        on_success,
+        on_error
+    ).await?;
+    
+    Ok(())
+}
+```
+
+## Consume options
+
+Fine-tune consumer behavior with `ConsumeOptions`:
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, ConsumeOptions};
+use std::time::Duration;
+
+let consume_options = ConsumeOptions::builder()
+    .auto_ack(false)           // Manually acknowledge messages
+    .handler_ack(true)         // Auto-ack after successful handler
+    .consume_wait(Duration::from_millis(10)) // Sleep between iterations
+    .build();
+
+queue.process_messages(
+    "jobs",
+    Some(5),
+    Some(consume_options),
+    |message: BrokerMessage<JobPayload>| async move {
+        // Process message
+        Ok(())
+    }
+).await?;
+```
+
+### Consume options explained
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `auto_ack` | `false` | Automatically acknowledge messages on receive (bypass handler) |
+| `handler_ack` | `true` | Acknowledge messages after successful handler execution |
+| `fairness` | `None` | Enable fairness queue mode (Redis only) |
+| `consume_wait` | `0ms` | Sleep duration between consumer loop iterations |
+
+<Note>
+  Setting `consume_wait` to a small value (e.g., 10ms) allows Tokio to abort tasks gracefully when shutting down. Without it, CPU-bound loops cannot be interrupted.
+</Note>
+
+## Manual acknowledgment control
+
+Disable automatic acknowledgment to handle it manually:
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, ConsumeOptions};
+
+let options = ConsumeOptions::builder()
+    .handler_ack(false) // Don't auto-acknowledge
+    .build();
+
+let queue_clone = queue.clone();
+
+queue.process_messages(
+    "jobs",
+    Some(3),
+    Some(options),
+    move |message: BrokerMessage<JobPayload>| {
+        let queue = queue_clone.clone();
+        async move {
+            // Spawn a long-running task
+            tokio::spawn(async move {
+                // Do work...
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                
+                // Manually acknowledge when done
+                queue.acknowledge("jobs", message).await.ok();
+            });
+            
+            // Return immediately
+            Ok(())
+        }
+    }
+).await?;
+```
+
+<Warning>
+  When `handler_ack` is false, you are responsible for calling `acknowledge` or `reject`. Failing to do so will leave messages in the processing queue.
+</Warning>
+
+## Fairness queues
+
+Fairness queues ensure balanced processing across different message groups using disambiguators:
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, ConsumeOptions};
+
+// Publish messages with disambiguators
+for user_id in &["user_1", "user_2", "user_3"] {
+    for i in 0..100 {
+        queue.publish(
+            "notifications",
+            Some(user_id.to_string()), // disambiguator
+            &JobPayload { 
+                id: format!("{}_{}", user_id, i),
+                task_name: "send_email".to_string(),
+            },
+            None
+        ).await?;
+    }
+}
+
+// Consume with fairness enabled
+let options = ConsumeOptions::builder()
+    .fairness(true) // Enable fair consumption
+    .build();
+
+queue.process_messages(
+    "notifications",
+    Some(10),
+    Some(options),
+    |message: BrokerMessage<JobPayload>| async move {
+        println!("Processing: {}", message.payload.id);
+        Ok(())
+    }
+).await?;
+```
+
+<Tip>
+  Fairness queues prevent one disambiguator from monopolizing workers. Each disambiguator gets a fair share of processing time.
+</Tip>
+
+## Graceful shutdown
+
+Handle shutdown signals to stop processing gracefully:
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, ConsumeOptions};
+use tokio::signal;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(10)
+        .build()
+        .await?;
+
+    let consume_options = ConsumeOptions::builder()
+        .consume_wait(Duration::from_millis(100)) // Allow interruption
+        .build();
+
+    let processing_task = tokio::spawn(async move {
+        queue.process_messages(
+            "jobs",
+            Some(5),
+            Some(consume_options),
+            |message: BrokerMessage<JobPayload>| async move {
+                println!("Processing: {}", message.payload.id);
+                Ok(())
+            }
+        ).await
+    });
+
+    // Wait for shutdown signal
+    signal::ctrl_c().await?;
+    println!("Received shutdown signal, stopping workers...");
+    
+    processing_task.abort();
+    
+    Ok(())
+}
+```
+
+## Performance considerations
+
+### Optimal concurrency
+
+The ideal concurrency level depends on your workload:
+
+```rust
+// For CPU-bound tasks
+let cpu_concurrency = num_cpus::get();
+
+// For I/O-bound tasks (database, HTTP calls)
+let io_concurrency = 20;
+
+// For very fast async operations
+let async_concurrency = 100;
+```
+
+### Avoid over-concurrency
+
+Too much concurrency can hurt performance:
+
+- Context switching overhead
+- Connection pool exhaustion
+- Broker overload
+- Memory pressure
+
+<Note>
+  Start with low concurrency and increase gradually while monitoring throughput and latency. The sweet spot varies by workload.
+</Note>
+
+## Batch consumption patterns
+
+For high-throughput scenarios, consider batch operations:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use time::Duration;
+
+// Consume messages in batches
+loop {
+    let messages = queue.consume_batch::<JobPayload>(
+        "jobs",
+        100, // batch size
+        Duration::seconds(5), // timeout
+        None
+    ).await?;
+    
+    // Process batch concurrently
+    let tasks: Vec<_> = messages.into_iter()
+        .map(|msg| tokio::spawn(async move {
+            // Process message
+            process_job(msg.payload).await
+        }))
+        .collect();
+    
+    // Wait for all tasks
+    for task in tasks {
+        task.await??;
+    }
+}
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Performance optimization" icon="gauge-high" href="/advanced/performance">
+    Learn how to optimize throughput and reduce latency
+  </Card>
+  <Card title="Management API" icon="chart-line" href="/advanced/management-api">
+    Monitor queue health and status
+  </Card>
+</CardGroup>

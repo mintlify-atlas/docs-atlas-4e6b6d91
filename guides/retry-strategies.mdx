@@ -1,0 +1,226 @@
+---
+title: Retry strategies
+description: Configure how Broccoli handles failed messages with customizable retry strategies
+---
+
+Broccoli automatically retries failed messages based on your configured retry strategy. This ensures transient failures don't result in lost messages.
+
+## Default retry behavior
+
+By default, Broccoli retries failed messages up to 3 times:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(Default::default())
+    .build()
+    .await?;
+```
+
+The default strategy:
+- Enables automatic retries
+- Sets maximum attempts to 3
+- Moves messages to the failed queue after max attempts
+
+## Custom retry attempts
+
+Configure the number of retry attempts:
+
+```rust
+use broccoli_queue::queue::RetryStrategy;
+
+let retry_strategy = RetryStrategy::new()
+    .with_attempts(5); // Retry up to 5 times
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(retry_strategy)
+    .build()
+    .await?;
+```
+
+## Disable retries
+
+Move messages directly to the failed queue on first failure:
+
+```rust
+let retry_strategy = RetryStrategy::new()
+    .retry_failed(false); // Disable retries
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(retry_strategy)
+    .build()
+    .await?;
+```
+
+<Warning>
+With retries disabled, messages move to the failed queue immediately after the first failure.
+</Warning>
+
+## How retries work
+
+When a message fails processing:
+
+<Steps>
+
+### Message is rejected
+
+When your handler returns an error or you call `reject()`, the message is marked as failed:
+
+```rust
+queue.process_messages("jobs", None, None, |message| async move {
+    // Processing logic
+    if some_condition {
+        return Err(BroccoliError::Consume("Processing failed".to_string()));
+    }
+    Ok(())
+}).await?;
+```
+
+### Retry count is incremented
+
+Broccoli checks the message's `attempts` field and increments it.
+
+### Re-queue or move to failed
+
+If attempts < max_attempts, the message is re-queued for another try. Otherwise, it moves to the failed queue:
+
+```text
+Attempt 1: Failed -> Re-queue (attempts = 1)
+Attempt 2: Failed -> Re-queue (attempts = 2)
+Attempt 3: Failed -> Re-queue (attempts = 3)
+Attempt 4: Failed -> Move to failed queue
+```
+
+</Steps>
+
+## Tracking message attempts
+
+Access the attempt count in your handler:
+
+```rust
+queue.process_messages("jobs", None, None, |message| async move {
+    println!("Processing attempt {} for message {}", 
+        message.attempts, 
+        message.task_id
+    );
+    
+    // Your logic here
+    Ok(())
+}).await?;
+```
+
+## Failed queue management
+
+Messages that exceed the retry limit are moved to a failed queue:
+
+- **Redis**: `{queue_name}_failed` or `{queue_name}_{disambiguator}_failed`
+- **RabbitMQ**: `{queue_name}_failed`
+
+You can inspect failed messages for debugging:
+
+```rust
+#[cfg(feature = "management")]
+use broccoli_queue::brokers::management::QueueStatus;
+
+let status = queue.queue_status("jobs".to_string(), None).await?;
+println!("Failed messages: {}", status.failed_count);
+```
+
+## Retry strategy patterns
+
+Here are common retry strategy configurations:
+
+<CodeGroup>
+
+```rust Aggressive retries
+// Many retries for transient failures
+let strategy = RetryStrategy::new()
+    .with_attempts(10);
+```
+
+```rust Conservative retries
+// Few retries, fail fast
+let strategy = RetryStrategy::new()
+    .with_attempts(1);
+```
+
+```rust No retries
+// Immediate failure, useful for idempotent operations
+let strategy = RetryStrategy::new()
+    .retry_failed(false);
+```
+
+```rust Default
+// Balanced approach (3 attempts)
+let strategy = RetryStrategy::default();
+```
+
+</CodeGroup>
+
+## Manual rejection
+
+You can manually reject messages in your code:
+
+```rust
+let message = queue.consume::<JobPayload>("jobs", None).await?;
+
+if !is_valid(&message.payload) {
+    // Reject and trigger retry logic
+    queue.reject("jobs", message).await?;
+} else {
+    // Process normally
+    process(&message.payload).await?;
+    queue.acknowledge("jobs", message).await?;
+}
+```
+
+<Tip>
+Use `reject()` for recoverable errors that might succeed on retry. Use `cancel()` to permanently delete invalid messages.
+</Tip>
+
+## Best practices
+
+<AccordionGroup>
+
+<Accordion title="Choose appropriate retry counts">
+Set retry attempts based on your failure patterns:
+- Transient network issues: 5-10 retries
+- Database deadlocks: 3-5 retries
+- Validation errors: 0-1 retries (fail fast)
+</Accordion>
+
+<Accordion title="Monitor failed queues">
+Regularly check failed queues for patterns:
+```rust
+let status = queue.queue_status("jobs".to_string(), None).await?;
+if status.failed_count > 100 {
+    // Alert or investigate
+}
+```
+</Accordion>
+
+<Accordion title="Implement exponential backoff">
+While Broccoli doesn't have built-in exponential backoff, you can implement it in your handler:
+```rust
+queue.process_messages("jobs", None, None, |message| async move {
+    let backoff = Duration::from_secs(2_u64.pow(message.attempts as u32));
+    tokio::time::sleep(backoff).await;
+    // Process message
+    Ok(())
+}).await?;
+```
+</Accordion>
+
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Consuming messages" icon="inbox" href="/guides/consuming">
+    Learn about message consumption patterns
+  </Card>
+  <Card title="Batch operations" icon="layer-group" href="/guides/batch-operations">
+    Handle multiple messages efficiently
+  </Card>
+</CardGroup>

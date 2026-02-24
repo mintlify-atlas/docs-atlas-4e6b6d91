@@ -1,0 +1,127 @@
+---
+title: Publishing messages
+description: Learn how to publish messages to Broccoli queues with various options and configurations
+---
+
+Publishing messages to Broccoli queues is straightforward and supports both single and batch operations. You can configure message behavior with options like priority, TTL, and scheduling.
+
+## Basic publishing
+
+To publish a single message, use the `publish` method:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+}
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .build()
+    .await?;
+
+let job = JobPayload {
+    id: "job-1".to_string(),
+    task_name: "process_data".to_string(),
+};
+
+// Publish a single message
+let message = queue.publish("jobs", None, &job, None).await?;
+println!("Published message with ID: {}", message.task_id);
+```
+
+## Publish with options
+
+You can customize message behavior using `PublishOptions`:
+
+<CodeGroup>
+
+```rust Priority
+use broccoli_queue::queue::PublishOptions;
+
+let options = PublishOptions::builder()
+    .priority(1) // 1 = highest, 5 = lowest
+    .build();
+
+queue.publish("jobs", None, &job, Some(options)).await?;
+```
+
+```rust TTL
+use time::Duration;
+
+let options = PublishOptions::builder()
+    .ttl(Duration::hours(24))
+    .build();
+
+queue.publish("jobs", None, &job, Some(options)).await?;
+```
+
+```rust Delay
+let options = PublishOptions::builder()
+    .delay(Duration::seconds(30))
+    .build();
+
+queue.publish("jobs", None, &job, Some(options)).await?;
+```
+
+</CodeGroup>
+
+<Note>
+Priority must be a value between 1 and 5, where 1 is the highest priority and 5 is the lowest.
+</Note>
+
+## Publishing with disambiguators
+
+Disambiguators enable fairness queues, ensuring messages are processed in a round-robin fashion across different categories:
+
+```rust
+// Publish messages with different disambiguators
+queue.publish("jobs", Some("user-123".to_string()), &job1, None).await?;
+queue.publish("jobs", Some("user-456".to_string()), &job2, None).await?;
+
+// Messages will be consumed fairly across disambiguators
+```
+
+<Tip>
+See the [fairness queues guide](/guides/fairness-queues) for more details on using disambiguators.
+</Tip>
+
+## Message structure
+
+Every published message is wrapped in a `BrokerMessage` that includes:
+
+- `task_id` - Unique UUID for the message
+- `payload` - Your serialized data
+- `attempts` - Number of processing attempts (starts at 0)
+- `disambiguator` - Optional category identifier
+
+```rust
+println!("Message ID: {}", message.task_id);
+println!("Payload: {:?}", message.payload);
+println!("Attempts: {}", message.attempts);
+```
+
+## Error handling
+
+Handle publishing errors appropriately:
+
+```rust
+match queue.publish("jobs", None, &job, None).await {
+    Ok(message) => println!("Published: {}", message.task_id),
+    Err(e) => eprintln!("Failed to publish: {}", e),
+}
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Batch operations" icon="layer-group" href="/guides/batch-operations">
+    Learn how to publish multiple messages efficiently
+  </Card>
+  <Card title="Message scheduling" icon="clock" href="/guides/message-scheduling">
+    Schedule messages for future delivery
+  </Card>
+</CardGroup>

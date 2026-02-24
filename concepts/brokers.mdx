@@ -1,0 +1,353 @@
+---
+title: Brokers
+description: Understand how Broccoli's broker abstraction works and how to use different message broker backends
+---
+
+Brokers are the backend systems that store and route your messages. Broccoli provides a unified abstraction over multiple broker implementations, allowing you to switch backends without changing your application code.
+
+## The Broker trait
+
+All broker implementations follow the `Broker` trait, which defines the core operations for message queue systems:
+
+```rust
+#[async_trait::async_trait]
+pub trait Broker: Send + Sync {
+    async fn connect(&mut self, broker_url: &str) -> Result<(), BroccoliError>;
+    
+    async fn publish(
+        &self,
+        queue_name: &str,
+        disambiguator: Option<String>,
+        message: &[InternalBrokerMessage],
+        options: Option<PublishOptions>,
+    ) -> Result<Vec<InternalBrokerMessage>, BroccoliError>;
+    
+    async fn consume(
+        &self,
+        queue_name: &str,
+        options: Option<ConsumeOptions>,
+    ) -> Result<InternalBrokerMessage, BroccoliError>;
+    
+    async fn try_consume(
+        &self,
+        queue_name: &str,
+        options: Option<ConsumeOptions>,
+    ) -> Result<Option<InternalBrokerMessage>, BroccoliError>;
+    
+    async fn acknowledge(
+        &self,
+        queue_name: &str,
+        message: InternalBrokerMessage,
+    ) -> Result<(), BroccoliError>;
+    
+    async fn reject(
+        &self,
+        queue_name: &str,
+        message: InternalBrokerMessage,
+    ) -> Result<(), BroccoliError>;
+    
+    async fn cancel(
+        &self,
+        queue_name: &str,
+        message_id: String,
+    ) -> Result<(), BroccoliError>;
+    
+    async fn size(
+        &self,
+        queue_name: &str,
+    ) -> Result<HashMap<String, u64>, BroccoliError>;
+}
+```
+
+## Supported brokers
+
+Broccoli currently supports three broker backends, each enabled via feature flags:
+
+### Redis
+
+<Note>
+Enable with the `redis` feature flag.
+</Note>
+
+Redis is a fast in-memory data store that provides list-based message queues. It's ideal for high-throughput scenarios where message persistence is less critical.
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .build()
+    .await?;
+```
+
+**Characteristics:**
+- Very fast performance
+- Simple setup
+- In-memory storage with optional persistence
+- Supports fairness queues
+- Supports message priority
+
+### RabbitMQ
+
+<Note>
+Enable with the `rabbitmq` feature flag.
+</Note>
+
+RabbitMQ is a robust message broker with advanced routing capabilities and guaranteed message delivery.
+
+```rust
+let queue = BroccoliQueue::builder("amqp://guest:guest@localhost:5672")
+    .build()
+    .await?;
+```
+
+**Characteristics:**
+- Production-grade reliability
+- Message persistence
+- Advanced routing options
+- Supports delayed messages (requires plugin)
+- Clustering and high availability
+
+<Warning>
+To use message scheduling with RabbitMQ, you must install the [delayed-exchange plugin](https://www.rabbitmq.com/blog/2015/04/16/scheduling-messages-with-rabbitmq).
+</Warning>
+
+### SurrealDB
+
+<Note>
+Enable with the `surrealdb` feature flag.
+</Note>
+
+SurrealDB is a multi-model database that can function as a message broker. This is useful when you want to use the same database for both your application data and message queuing.
+
+```rust
+let queue = BroccoliQueue::builder("ws://localhost:8000")
+    .build()
+    .await?;
+```
+
+You can also reuse an existing SurrealDB connection:
+
+```rust
+use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
+
+let db: Surreal<Any> = Surreal::init();
+db.connect("ws://localhost:8000").await?;
+
+let queue = BroccoliQueue::builder_with(db)
+    .build()
+    .await?;
+```
+
+**Characteristics:**
+- Unified data and messaging backend
+- Strong consistency guarantees
+- Schema-aware storage
+- In-memory or persistent storage
+
+<Warning>
+Concurrent reads on the same SurrealDB topic may cause `BroccoliError::BrokerNonIdempotentOp` errors. Use appropriate concurrency controls.
+</Warning>
+
+## Broker configuration
+
+You can customize broker behavior using `BrokerConfig`:
+
+```rust
+pub struct BrokerConfig {
+    pub retry_attempts: Option<u8>,
+    pub retry_failed: Option<bool>,
+    pub pool_connections: Option<u8>,
+    pub enable_scheduling: Option<bool>,
+}
+```
+
+Configuration is passed through the builder:
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(
+        RetryStrategy::new()
+            .with_attempts(5)
+            .retry_failed(true)
+    )
+    .pool_connections(20)
+    .enable_scheduling(true)
+    .build()
+    .await?;
+```
+
+### Retry strategy
+
+Control how failed messages are retried:
+
+```rust
+let strategy = RetryStrategy::new()
+    .with_attempts(3)        // Retry up to 3 times
+    .retry_failed(true);     // Enable retries
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(strategy)
+    .build()
+    .await?;
+```
+
+When a message fails:
+1. If `retry_failed` is true and attempts remain, it's requeued
+2. Otherwise, it moves to the failed queue
+
+### Connection pooling
+
+Control the number of connections to the broker:
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(10)  // Maintain 10 connections
+    .build()
+    .await?;
+```
+
+Defaults to 10 connections. Higher values support more concurrency but consume more resources.
+
+### Message scheduling
+
+Enable delayed and scheduled message delivery:
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .enable_scheduling(true)
+    .build()
+    .await?;
+```
+
+This allows you to use `PublishOptions` with `delay` or `scheduled_at`:
+
+```rust
+use time::Duration;
+
+let options = PublishOptions::builder()
+    .delay(Duration::minutes(5))
+    .build();
+
+queue.publish("tasks", None, &task, Some(options)).await?;
+```
+
+## Broker selection
+
+Broccoli automatically selects the broker implementation based on your URL scheme:
+
+| URL Scheme | Broker | Feature Flag |
+|------------|--------|-------------|
+| `redis://` | Redis | `redis` |
+| `amqp://` | RabbitMQ | `rabbitmq` |
+| `ws://`, `mem://` | SurrealDB | `surrealdb` |
+
+If no matching broker is found, you'll get a `BroccoliError::Broker` error.
+
+## Feature flags
+
+You must enable at least one broker feature in your `Cargo.toml`:
+
+```toml
+[dependencies]
+broccoli-queue = { version = "*", features = ["redis"] }
+```
+
+Or enable multiple brokers:
+
+```toml
+[dependencies]
+broccoli-queue = { version = "*", features = ["redis", "rabbitmq"] }
+```
+
+This allows you to switch brokers at runtime by changing the connection URL.
+
+## Broker methods
+
+While you typically interact with `BroccoliQueue`, understanding the underlying broker methods helps you understand how the system works.
+
+### connect
+
+Establishes a connection to the broker:
+
+```rust
+async fn connect(&mut self, broker_url: &str) -> Result<(), BroccoliError>
+```
+
+Called automatically by the builder.
+
+### publish
+
+Sends messages to a queue:
+
+```rust
+async fn publish(
+    &self,
+    queue_name: &str,
+    disambiguator: Option<String>,
+    message: &[InternalBrokerMessage],
+    options: Option<PublishOptions>,
+) -> Result<Vec<InternalBrokerMessage>, BroccoliError>
+```
+
+### consume and try_consume
+
+Retrieve messages from a queue:
+
+```rust
+// Blocks until a message is available
+async fn consume(
+    &self,
+    queue_name: &str,
+    options: Option<ConsumeOptions>,
+) -> Result<InternalBrokerMessage, BroccoliError>
+
+// Returns immediately with None if no message available
+async fn try_consume(
+    &self,
+    queue_name: &str,
+    options: Option<ConsumeOptions>,
+) -> Result<Option<InternalBrokerMessage>, BroccoliError>
+```
+
+### acknowledge and reject
+
+Handle message processing results:
+
+```rust
+// Remove message from processing queue
+async fn acknowledge(
+    &self,
+    queue_name: &str,
+    message: InternalBrokerMessage,
+) -> Result<(), BroccoliError>
+
+// Requeue or move to failed queue
+async fn reject(
+    &self,
+    queue_name: &str,
+    message: InternalBrokerMessage,
+) -> Result<(), BroccoliError>
+```
+
+### size
+
+Get queue size information:
+
+```rust
+async fn size(
+    &self,
+    queue_name: &str,
+) -> Result<HashMap<String, u64>, BroccoliError>
+```
+
+Returns a map of queue names to their sizes. For fairness queues, includes all disambiguator queues.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Messages" icon="envelope" href="/concepts/messages">
+    Learn about message structure
+  </Card>
+  <Card title="Error Handling" icon="triangle-exclamation" href="/concepts/error-handling">
+    Handle errors gracefully
+  </Card>
+</CardGroup>

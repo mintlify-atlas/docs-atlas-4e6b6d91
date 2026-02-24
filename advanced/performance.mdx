@@ -1,0 +1,533 @@
+---
+title: Performance optimization
+description: Optimize message queue throughput, latency, and resource usage
+---
+
+Broccoli is designed for high performance, but proper configuration is essential to achieve optimal throughput and latency. This guide covers best practices and optimization techniques.
+
+## Benchmark results
+
+Broccoli's performance is comparable to direct broker usage while providing a higher-level API:
+
+| Operation | Broker | Messages/sec | Avg Latency |
+|-----------|--------|-------------|-------------|
+| Publish | Redis | ~10,000 | 0.1ms |
+| Consume | Redis | ~9,500 | 0.11ms |
+| Publish | RabbitMQ | ~8,000 | 0.125ms |
+| Consume | RabbitMQ | ~7,800 | 0.128ms |
+
+<Note>
+  Benchmarks run on localhost with default configurations. Production performance varies based on network latency, broker configuration, and hardware.
+</Note>
+
+## Connection pooling
+
+Connection pooling is critical for concurrent operations. The pool size should match your concurrency requirements:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(20) // 20 connections in the pool
+    .build()
+    .await?;
+```
+
+### Pool sizing guidelines
+
+<Steps>
+  <Step title="Calculate base requirement">
+    Set pool size to at least your total concurrency level across all consumers:
+    ```rust
+    let pool_size = concurrent_workers + batch_publishers + 2; // +2 for overhead
+    ```
+  </Step>
+  
+  <Step title="Account for multiple queues">
+    If processing multiple queues simultaneously, multiply by the number of queues:
+    ```rust
+    let pool_size = (workers_per_queue * num_queues) + 2;
+    ```
+  </Step>
+  
+  <Step title="Test under load">
+    Monitor connection pool exhaustion and adjust upward if needed.
+  </Step>
+</Steps>
+
+<Warning>
+  Connection pool exhaustion causes errors and failed operations. Always provision adequate connections for your workload.
+</Warning>
+
+## Batch operations
+
+Batch publishing is significantly faster than individual publishes:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Job {
+    id: String,
+    data: String,
+}
+
+// ❌ Slow: Individual publishes
+for i in 0..1000 {
+    queue.publish(
+        "jobs",
+        None,
+        &Job { id: i.to_string(), data: "test".to_string() },
+        None
+    ).await?;
+}
+
+// ✅ Fast: Batch publish
+let jobs: Vec<Job> = (0..1000)
+    .map(|i| Job { id: i.to_string(), data: "test".to_string() })
+    .collect();
+
+queue.publish_batch("jobs", None, jobs, None).await?;
+```
+
+### Batch consumption
+
+Similarly, consuming in batches reduces overhead:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use time::Duration;
+
+loop {
+    // Consume up to 100 messages at once
+    let messages = queue.try_consume_batch::<Job>(
+        "jobs",
+        100, // batch size
+        None
+    ).await?;
+    
+    if messages.is_empty() {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        continue;
+    }
+    
+    // Process batch
+    for msg in messages {
+        process_job(msg.payload).await?;
+        queue.acknowledge("jobs", msg).await?;
+    }
+}
+```
+
+<Tip>
+  Batch sizes of 50-100 messages provide good throughput without excessive memory usage. Tune based on your message size and processing time.
+</Tip>
+
+## Concurrency tuning
+
+Optimal concurrency depends on workload characteristics:
+
+### I/O-bound workloads
+
+For tasks that spend most time waiting (database queries, HTTP calls):
+
+```rust
+// High concurrency for I/O-bound tasks
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(50)
+    .build()
+    .await?;
+
+queue.process_messages(
+    "api_calls",
+    Some(50), // High concurrency
+    None,
+    |message: BrokerMessage<Job>| async move {
+        // I/O-bound operation
+        let response = reqwest::get("https://api.example.com")
+            .await?;
+        Ok(())
+    }
+).await?;
+```
+
+### CPU-bound workloads
+
+For tasks that perform heavy computation:
+
+```rust
+// Lower concurrency for CPU-bound tasks
+let cpu_count = num_cpus::get();
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(cpu_count as u8 + 2)
+    .build()
+    .await?;
+
+queue.process_messages(
+    "image_processing",
+    Some(cpu_count), // Match CPU cores
+    None,
+    |message: BrokerMessage<Job>| async move {
+        // CPU-bound operation
+        tokio::task::spawn_blocking(move || {
+            process_image(message.payload)
+        }).await??;
+        Ok(())
+    }
+).await?;
+```
+
+<Note>
+  Use `spawn_blocking` for CPU-intensive work to avoid blocking the async runtime.
+</Note>
+
+## Retry strategy optimization
+
+Configure retry behavior to balance reliability and performance:
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, RetryStrategy};
+
+// Fast-fail strategy for time-sensitive operations
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(
+        RetryStrategy::new()
+            .with_attempts(1)        // Only 1 retry
+            .retry_failed(true)
+    )
+    .build()
+    .await?;
+
+// Aggressive retry for critical operations
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(
+        RetryStrategy::new()
+            .with_attempts(5)        // 5 retry attempts
+            .retry_failed(true)
+    )
+    .build()
+    .await?;
+
+// No retries for idempotent operations
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(
+        RetryStrategy::new()
+            .retry_failed(false)     // Send directly to failed queue
+    )
+    .build()
+    .await?;
+```
+
+## Message scheduling overhead
+
+Scheduled messages have additional overhead. Use them only when necessary:
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, PublishOptions};
+use time::{Duration, OffsetDateTime};
+
+// ✅ Good: Immediate publish (no scheduling overhead)
+queue.publish("jobs", None, &job, None).await?;
+
+// ⚠️ Overhead: Delayed publish
+let options = PublishOptions::builder()
+    .delay(Duration::seconds(60))
+    .build();
+queue.publish("jobs", None, &job, Some(options)).await?;
+
+// ⚠️ Overhead: Scheduled publish
+let options = PublishOptions::builder()
+    .schedule_at(OffsetDateTime::now_utc() + Duration::hours(1))
+    .build();
+queue.publish("jobs", None, &job, Some(options)).await?;
+```
+
+<Warning>
+  RabbitMQ requires the `rabbitmq-delayed-message-exchange` plugin for scheduling. Redis and SurrealDB support scheduling natively.
+</Warning>
+
+## Serialization efficiency
+
+Message serialization impacts performance. Broccoli uses `serde_json` by default:
+
+```rust
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct CompactJob {
+    id: u64,                    // ✅ Compact: 8 bytes
+    #[serde(rename = "t")]      // ✅ Short field names
+    task_type: u8,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct VerboseJob {
+    identifier: String,         // ❌ Verbose: variable size
+    task_description: String,   // ❌ Long field names
+    metadata: HashMap<String, String>, // ❌ Nested structures
+}
+```
+
+<Tip>
+  Keep messages compact. Use numeric IDs instead of strings, short field names, and avoid deeply nested structures.
+</Tip>
+
+## Broker-specific optimizations
+
+### Redis
+
+Redis-specific performance tips:
+
+```rust
+// Use pipelining for batch operations (automatic in publish_batch)
+queue.publish_batch("jobs", None, jobs, None).await?;
+
+// For fairness queues, use disambiguators strategically
+queue.publish(
+    "tasks",
+    Some(user_id.to_string()), // Partition by user
+    &task,
+    None
+).await?;
+```
+
+**Redis configuration recommendations:**
+
+```conf redis.conf
+# Increase max connections
+maxclients 10000
+
+# Use appropriate eviction policy
+maxmemory-policy noeviction
+
+# Disable persistence for maximum performance (if acceptable)
+save ""
+appendonly no
+```
+
+<Warning>
+  Disabling persistence in Redis means messages may be lost on restart. Only disable if message durability is not required.
+</Warning>
+
+### RabbitMQ
+
+RabbitMQ-specific optimizations:
+
+```rust
+// Enable scheduling only if needed (requires plugin)
+let queue = BroccoliQueue::builder("amqp://localhost:5672")
+    .enable_scheduling(false) // Disable if not using delays
+    .pool_connections(20)
+    .build()
+    .await?;
+```
+
+**RabbitMQ configuration recommendations:**
+
+```conf rabbitmq.conf
+# Increase channel max
+channel_max = 1000
+
+# Tune prefetch for your workload
+consumer_prefetch = 100
+
+# Use lazy queues for large queues
+queue_mode = lazy
+```
+
+## Monitoring performance
+
+Track key metrics to identify bottlenecks:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use std::time::Instant;
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Job { id: String }
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .build()
+    .await?;
+
+queue.process_messages(
+    "jobs",
+    Some(10),
+    None,
+    |message: BrokerMessage<Job>| async move {
+        let start = Instant::now();
+        
+        // Process message
+        process_job(message.payload).await?;
+        
+        let duration = start.elapsed();
+        
+        // Track metrics
+        metrics::histogram!("job_processing_duration_ms")
+            .record(duration.as_millis() as f64);
+        metrics::counter!("jobs_processed_total").increment(1);
+        
+        Ok(())
+    }
+).await?;
+```
+
+### Key metrics to monitor
+
+| Metric | Description | Target |
+|--------|-------------|--------|
+| Message throughput | Messages processed per second | Varies by workload |
+| Processing latency | Time to process one message | < 100ms for most tasks |
+| Queue depth | Number of pending messages | < 1000 for healthy queues |
+| Failed message rate | Percentage of failed messages | < 1% |
+| Connection pool usage | Active connections / pool size | < 80% |
+
+## Load testing
+
+Benchmark your specific workload:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+use std::time::Instant;
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Job { id: String, data: String }
+
+async fn benchmark_throughput() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(20)
+        .build()
+        .await?;
+
+    let message_count = 10_000;
+    let jobs: Vec<Job> = (0..message_count)
+        .map(|i| Job {
+            id: i.to_string(),
+            data: format!("test data {}", i),
+        })
+        .collect();
+
+    // Benchmark publishing
+    let start = Instant::now();
+    queue.publish_batch("benchmark", None, jobs, None).await?;
+    let publish_duration = start.elapsed();
+    
+    let publish_throughput = message_count as f64 / publish_duration.as_secs_f64();
+    println!("Publish throughput: {:.0} msg/sec", publish_throughput);
+
+    // Benchmark consuming
+    let start = Instant::now();
+    for _ in 0..message_count {
+        let msg = queue.consume::<Job>("benchmark", None).await?;
+        queue.acknowledge("benchmark", msg).await?;
+    }
+    let consume_duration = start.elapsed();
+    
+    let consume_throughput = message_count as f64 / consume_duration.as_secs_f64();
+    println!("Consume throughput: {:.0} msg/sec", consume_throughput);
+
+    Ok(())
+}
+```
+
+## Common performance pitfalls
+
+### Pitfall 1: Insufficient connection pool
+
+```rust
+// ❌ Bad: Pool too small for concurrency
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(2)  // Only 2 connections
+    .build()
+    .await?;
+
+queue.process_messages("jobs", Some(10), None, handler).await?; // 10 workers!
+```
+
+### Pitfall 2: Blocking operations in async handlers
+
+```rust
+// ❌ Bad: Blocking the async runtime
+queue.process_messages(
+    "jobs",
+    Some(10),
+    None,
+    |message| async move {
+        std::thread::sleep(std::time::Duration::from_secs(1)); // Blocks!
+        Ok(())
+    }
+).await?;
+
+// ✅ Good: Use spawn_blocking for CPU work
+queue.process_messages(
+    "jobs",
+    Some(10),
+    None,
+    |message| async move {
+        tokio::task::spawn_blocking(move || {
+            // CPU-intensive work
+            expensive_computation()
+        }).await??;
+        Ok(())
+    }
+).await?;
+```
+
+### Pitfall 3: Creating new queue instances repeatedly
+
+```rust
+// ❌ Bad: Creating queue for each operation
+for job in jobs {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .build()
+        .await?;
+    queue.publish("jobs", None, &job, None).await?;
+}
+
+// ✅ Good: Reuse queue instance (it's Clone + Send + Sync)
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .build()
+    .await?;
+
+for job in jobs {
+    queue.publish("jobs", None, &job, None).await?;
+}
+```
+
+## Production checklist
+
+<Steps>
+  <Step title="Size connection pool appropriately">
+    Set `pool_connections` to at least your total concurrency across all consumers.
+  </Step>
+  
+  <Step title="Use batch operations">
+    Prefer `publish_batch` and `try_consume_batch` for high throughput.
+  </Step>
+  
+  <Step title="Tune concurrency">
+    Match concurrency to workload type (I/O vs CPU-bound).
+  </Step>
+  
+  <Step title="Configure retry strategy">
+    Balance reliability and performance based on message criticality.
+  </Step>
+  
+  <Step title="Monitor key metrics">
+    Track throughput, latency, queue depth, and error rates.
+  </Step>
+  
+  <Step title="Load test">
+    Benchmark with realistic workloads before deploying to production.
+  </Step>
+</Steps>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Concurrency patterns" icon="gears" href="/advanced/concurrency">
+    Learn advanced concurrency configurations
+  </Card>
+  <Card title="Management API" icon="chart-line" href="/advanced/management-api">
+    Monitor queue health and debug issues
+  </Card>
+</CardGroup>

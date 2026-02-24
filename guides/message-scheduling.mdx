@@ -1,0 +1,231 @@
+---
+title: Message scheduling
+description: Schedule messages for delayed or future delivery with Broccoli's scheduling capabilities
+---
+
+Broccoli supports scheduling messages for delayed execution or delivery at a specific time. This is useful for implementing task scheduling, rate limiting, and timed workflows.
+
+## Enable scheduling
+
+Scheduling must be enabled when building your queue:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .enable_scheduling(true)
+    .build()
+    .await?;
+```
+
+<Warning>
+**RabbitMQ users**: You must install the [delayed-exchange plugin](https://www.rabbitmq.com/blog/2015/04/16/scheduling-messages-with-rabbitmq) for scheduling support.
+</Warning>
+
+## Delay messages
+
+Publish messages with a delay before they become available for consumption:
+
+```rust
+use broccoli_queue::queue::PublishOptions;
+use time::Duration;
+
+let options = PublishOptions::builder()
+    .delay(Duration::seconds(30)) // Delay for 30 seconds
+    .build();
+
+queue.publish("jobs", None, &job, Some(options)).await?;
+```
+
+<Note>
+The message will not be available to consumers until the delay period has elapsed.
+</Note>
+
+## Schedule at specific time
+
+Schedule messages to be delivered at an exact timestamp:
+
+```rust
+use time::OffsetDateTime;
+
+let scheduled_time = OffsetDateTime::now_utc() + Duration::hours(2);
+
+let options = PublishOptions::builder()
+    .schedule_at(scheduled_time)
+    .build();
+
+queue.publish("jobs", None, &job, Some(options)).await?;
+```
+
+## Batch scheduling
+
+Schedule multiple messages at once:
+
+```rust
+let jobs = vec![job1, job2, job3];
+
+let options = PublishOptions::builder()
+    .delay(Duration::minutes(5))
+    .build();
+
+queue.publish_batch("jobs", None, jobs, Some(options)).await?;
+```
+
+## Common scheduling patterns
+
+<CodeGroup>
+
+```rust Rate limiting
+// Delay each message by 1 second
+for job in jobs {
+    let options = PublishOptions::builder()
+        .delay(Duration::seconds(1))
+        .build();
+    
+    queue.publish("jobs", None, &job, Some(options)).await?;
+}
+```
+
+```rust Daily tasks
+// Schedule for tomorrow at 9 AM
+use time::Time;
+
+let tomorrow = OffsetDateTime::now_utc() + Duration::days(1);
+let nine_am = tomorrow.replace_time(Time::from_hms(9, 0, 0).unwrap());
+
+let options = PublishOptions::builder()
+    .schedule_at(nine_am)
+    .build();
+
+queue.publish("daily_report", None, &report, Some(options)).await?;
+```
+
+```rust Retry with backoff
+// Re-publish failed message with exponential delay
+let delay_seconds = 2_u64.pow(message.attempts as u32);
+
+let options = PublishOptions::builder()
+    .delay(Duration::seconds(delay_seconds as i64))
+    .build();
+
+queue.publish("jobs", None, &message.payload, Some(options)).await?;
+```
+
+</CodeGroup>
+
+## Combining scheduling with other options
+
+You can combine scheduling with TTL and priority:
+
+```rust
+let options = PublishOptions::builder()
+    .delay(Duration::minutes(5))      // Delay 5 minutes
+    .ttl(Duration::hours(1))          // Expire after 1 hour
+    .priority(1)                       // High priority
+    .build();
+
+queue.publish("jobs", None, &job, Some(options)).await?;
+```
+
+<Tip>
+The TTL countdown starts when the message is published, not when the delay expires.
+</Tip>
+
+## Example: Job scheduling system
+
+Here's a complete example of a job scheduling system:
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, PublishOptions};
+use serde::{Serialize, Deserialize};
+use time::{Duration, OffsetDateTime};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScheduledJob {
+    id: String,
+    task_name: String,
+    execute_at: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .enable_scheduling(true)
+        .build()
+        .await?;
+    
+    // Schedule a job for 10 seconds from now
+    let job = ScheduledJob {
+        id: "job-1".to_string(),
+        task_name: "process_data".to_string(),
+        execute_at: (OffsetDateTime::now_utc() + Duration::seconds(10)).to_string(),
+    };
+    
+    let options = PublishOptions::builder()
+        .delay(Duration::seconds(10))
+        .build();
+    
+    let message = queue.publish("scheduled_jobs", None, &job, Some(options)).await?;
+    println!("Scheduled job {} for execution in 10 seconds", message.task_id);
+    
+    Ok(())
+}
+```
+
+## Monitoring scheduled messages
+
+Check queue status to see pending scheduled messages:
+
+```rust
+#[cfg(feature = "management")]
+let status = queue.queue_status("jobs".to_string(), None).await?;
+println!("Pending messages: {}", status.pending_count);
+```
+
+## Limitations and considerations
+
+<AccordionGroup>
+
+<Accordion title="Scheduling accuracy">
+Scheduling is not guaranteed to be precise to the millisecond. Messages are typically delivered within seconds of the scheduled time, depending on broker implementation and system load.
+</Accordion>
+
+<Accordion title="Broker support">
+- **Redis**: Native support for delayed messages
+- **RabbitMQ**: Requires delayed-exchange plugin
+- **SurrealDB**: Check feature availability
+</Accordion>
+
+<Accordion title="Schedule vs delay">
+- Use `delay()` for relative delays from now
+- Use `schedule_at()` for absolute timestamps
+- You cannot use both in the same `PublishOptions`
+</Accordion>
+
+</AccordionGroup>
+
+## Canceling scheduled messages
+
+You can cancel scheduled messages before they're consumed:
+
+```rust
+let message = queue.publish("jobs", None, &job, Some(options)).await?;
+
+// Later, cancel if needed
+queue.cancel("jobs", message.task_id.to_string()).await?;
+```
+
+<Warning>
+Once a scheduled message becomes available and is consumed, it cannot be canceled.
+</Warning>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Publishing messages" icon="paper-plane" href="/guides/publishing">
+    Learn more about message publishing options
+  </Card>
+  <Card title="Batch operations" icon="layer-group" href="/guides/batch-operations">
+    Publish and schedule multiple messages efficiently
+  </Card>
+</CardGroup>

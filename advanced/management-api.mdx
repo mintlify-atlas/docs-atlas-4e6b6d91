@@ -1,0 +1,230 @@
+---
+title: Management API
+description: Monitor and inspect queue status using the management API feature
+---
+
+The management API allows you to inspect the state of your queues at runtime. This feature is available when you enable the `management` feature flag in your `Cargo.toml`.
+
+## Enabling the management feature
+
+Add the `management` feature to your dependencies:
+
+```toml Cargo.toml
+[dependencies]
+broccoli-queue = { version = "*", features = ["management"] }
+```
+
+## Getting queue status
+
+Use the `queue_status` method to retrieve detailed information about a queue:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .build()
+        .await?;
+
+    // Get status for a regular queue
+    let status = queue.queue_status("jobs".to_string(), None).await?;
+    
+    println!("Queue: {}", status.name);
+    println!("Type: {}", status.queue_type);
+    println!("Size: {}", status.size);
+    println!("Processing: {}", status.processing);
+    println!("Failed: {}", status.failed);
+    
+    Ok(())
+}
+```
+
+## Queue status structure
+
+The `QueueStatus` struct provides the following information:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `String` | Name of the queue |
+| `queue_type` | `QueueType` | Type of queue (Main, Processing, Failed, or Fairness) |
+| `size` | `usize` | Number of messages in the main queue |
+| `processing` | `usize` | Number of messages currently being processed |
+| `failed` | `usize` | Number of messages that failed processing |
+| `disambiguator_count` | `Option<usize>` | Number of disambiguators (fairness queues only) |
+
+## Queue types
+
+The management API distinguishes between different queue types:
+
+<Steps>
+  <Step title="Main queue">
+    The primary queue where new messages are published.
+  </Step>
+  
+  <Step title="Processing queue">
+    Temporary storage for messages currently being processed by workers.
+  </Step>
+  
+  <Step title="Failed queue">
+    Messages that failed processing after all retry attempts.
+  </Step>
+  
+  <Step title="Fairness queue">
+    Queues that use disambiguators to ensure fair processing across different message groups.
+  </Step>
+</Steps>
+
+## Working with fairness queues
+
+Fairness queues allow you to partition messages using disambiguators. You can get status for all subqueues or a specific one:
+
+```rust
+// Get status for all subqueues in a fairness queue
+let status = queue.queue_status("tasks".to_string(), None).await?;
+println!("Total disambiguators: {:?}", status.disambiguator_count);
+
+// Get status for a specific disambiguator
+let status = queue.queue_status(
+    "tasks".to_string(), 
+    Some("user_123".to_string())
+).await?;
+println!("Messages for user_123: {}", status.size);
+```
+
+<Note>
+  When querying a fairness queue without specifying a disambiguator, the API returns aggregated statistics across all subqueues.
+</Note>
+
+## Broker-specific behavior
+
+### Redis
+
+The Redis implementation uses the `KEYS` command to discover fairness queue subqueues. For production systems with many keys, consider:
+
+- Always specifying a queue name (never empty)
+- Using specific disambiguators when possible
+- Monitoring Redis key patterns: `{queue_name}_*_queue`
+
+```rust
+// Efficient: Query specific disambiguator
+let status = queue.queue_status(
+    "orders".to_string(),
+    Some("store_42".to_string())
+).await?;
+
+// Less efficient: Scans all subqueues
+let status = queue.queue_status("orders".to_string(), None).await?;
+```
+
+<Warning>
+  The Redis implementation will return an error if you provide an empty queue name, as this would require scanning all Redis keys.
+</Warning>
+
+### RabbitMQ
+
+The RabbitMQ implementation provides basic queue status through AMQP protocol. For detailed metrics, consider using the RabbitMQ Management HTTP API directly.
+
+<Tip>
+  The management API is read-only and does not modify queue state. It's safe to call frequently for monitoring purposes.
+</Tip>
+
+## Monitoring best practices
+
+### Health checks
+
+Use the management API to implement health checks:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+async fn health_check(queue: &BroccoliQueue) -> bool {
+    match queue.queue_status("critical_jobs".to_string(), None).await {
+        Ok(status) => {
+            // Alert if too many failed messages
+            if status.failed > 100 {
+                eprintln!("⚠️ High failure rate detected: {} failed messages", status.failed);
+                return false;
+            }
+            
+            // Alert if queue is backing up
+            if status.size > 10000 {
+                eprintln!("⚠️ Queue backlog detected: {} pending messages", status.size);
+                return false;
+            }
+            
+            true
+        }
+        Err(e) => {
+            eprintln!("❌ Health check failed: {}", e);
+            false
+        }
+    }
+}
+```
+
+### Metrics collection
+
+Export queue metrics to your monitoring system:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+async fn export_metrics(queue: &BroccoliQueue) -> Result<(), Box<dyn std::error::Error>> {
+    let queues = vec!["jobs", "emails", "notifications"];
+    
+    for queue_name in queues {
+        let status = queue.queue_status(queue_name.to_string(), None).await?;
+        
+        // Export to your metrics system (e.g., Prometheus, Datadog)
+        metrics::gauge!("queue_size", "queue" => queue_name).set(status.size as f64);
+        metrics::gauge!("queue_processing", "queue" => queue_name).set(status.processing as f64);
+        metrics::gauge!("queue_failed", "queue" => queue_name).set(status.failed as f64);
+    }
+    
+    Ok(())
+}
+```
+
+## Debugging failed messages
+
+Combine the management API with manual inspection:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct Task {
+    id: String,
+    data: String,
+}
+
+async fn inspect_failures(queue: &BroccoliQueue) -> Result<(), Box<dyn std::error::Error>> {
+    let status = queue.queue_status("tasks".to_string(), None).await?;
+    
+    if status.failed > 0 {
+        println!("Found {} failed messages", status.failed);
+        
+        // The failed queue follows the pattern: {queue_name}_failed
+        // You can manually inspect it using your broker's tools
+        println!("Inspect failed messages in: tasks_failed");
+    }
+    
+    Ok(())
+}
+```
+
+<Note>
+  The management API shows counts but doesn't provide direct access to message contents. Use your broker's native tools (Redis CLI, RabbitMQ Management UI) to inspect individual messages.
+</Note>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Concurrency patterns" icon="gears" href="/advanced/concurrency">
+    Learn how to configure worker concurrency
+  </Card>
+  <Card title="Performance optimization" icon="gauge-high" href="/advanced/performance">
+    Optimize throughput and latency
+  </Card>
+</CardGroup>

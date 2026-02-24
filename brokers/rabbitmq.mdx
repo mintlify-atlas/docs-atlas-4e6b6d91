@@ -1,0 +1,326 @@
+---
+title: "RabbitMQ broker"
+description: "Set up and use RabbitMQ as a message broker for Broccoli"
+---
+
+<Info>
+  **Prerequisites**:
+  - RabbitMQ server (version 3.8 or higher)
+  - Rust project with Broccoli configured
+</Info>
+
+RabbitMQ provides robust message queuing with advanced features like clustering, federation, and message persistence. It's ideal for distributed systems requiring high reliability.
+
+## Enable the RabbitMQ feature
+
+Add Broccoli to your `Cargo.toml` with the RabbitMQ feature:
+
+```toml Cargo.toml
+[dependencies]
+broccoli_queue = { version = "0.4", features = ["rabbitmq"] }
+```
+
+## Connect to RabbitMQ
+
+Create a queue instance with an AMQP connection URL:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("amqp://localhost:5672")
+        .pool_connections(10)
+        .build()
+        .await?;
+
+    Ok(())
+}
+```
+
+## Connection options
+
+The RabbitMQ broker supports AMQP connection URLs:
+
+```rust
+// Local RabbitMQ
+"amqp://localhost:5672"
+
+// RabbitMQ with authentication
+"amqp://username:password@localhost:5672"
+
+// RabbitMQ with virtual host
+"amqp://username:password@localhost:5672/vhost"
+
+// RabbitMQ with TLS
+"amqps://username:password@localhost:5671"
+
+// RabbitMQ with full configuration
+"amqp://user:pass@host:5672/vhost?heartbeat=30&connection_timeout=10000"
+```
+
+## Configuration
+
+Customize the RabbitMQ broker using the queue builder:
+
+```rust
+let queue = BroccoliQueue::builder("amqp://localhost:5672")
+    .pool_connections(15)           // Connection pool size (default: 10)
+    .retry_attempts(3)              // Max retry attempts (default: 3)
+    .retry_failed(true)             // Retry failed messages (default: true)
+    .enable_scheduling(true)        // Enable delayed messages
+    .build()
+    .await?;
+```
+
+<Note>
+  The RabbitMQ broker uses the `deadpool-lapin` connection pool for efficient connection management.
+</Note>
+
+## Publish messages
+
+<Steps>
+<Step title="Basic publishing">
+
+Publish a message to a queue:
+
+```rust
+use serde::{Serialize, Deserialize};
+use broccoli_queue::queue::BroccoliQueue;
+
+#[derive(Serialize, Deserialize)]
+struct Task {
+    id: String,
+    action: String,
+}
+
+let task = Task {
+    id: "task-1".to_string(),
+    action: "process_order".to_string(),
+};
+
+queue.publish("tasks", None, task, None).await?;
+```
+
+</Step>
+
+<Step title="Priority messages">
+
+Set message priority (1-5, where 1 is highest):
+
+```rust
+use broccoli_queue::queue::PublishOptions;
+
+queue.publish(
+    "tasks",
+    None,
+    task,
+    Some(PublishOptions {
+        priority: Some(1),  // High priority
+        ..Default::default()
+    })
+).await?;
+```
+
+<Note>
+  RabbitMQ internally uses inverted priority (0-9), but Broccoli normalizes this to 1-5 for consistency.
+</Note>
+
+</Step>
+
+<Step title="Delayed messages">
+
+Schedule messages with the `x-delay` header:
+
+```rust
+use time::Duration;
+use broccoli_queue::queue::PublishOptions;
+
+queue.publish(
+    "tasks",
+    None,
+    task,
+    Some(PublishOptions {
+        delay: Some(Duration::seconds(60)),
+        ..Default::default()
+    })
+).await?;
+```
+
+<Warning>
+  Delayed messages require the RabbitMQ delayed message exchange plugin and `enable_scheduling(true)` in your configuration.
+</Warning>
+
+</Step>
+
+<Step title="Message TTL">
+
+Set message expiration time:
+
+```rust
+queue.publish(
+    "tasks",
+    None,
+    task,
+    Some(PublishOptions {
+        ttl: Some(Duration::hours(2)),  // Expire after 2 hours
+        ..Default::default()
+    })
+).await?;
+```
+
+</Step>
+</Steps>
+
+## Consume messages
+
+Process messages from a queue with automatic acknowledgment:
+
+```rust
+queue.process_messages(
+    "tasks",
+    Some(4),  // Number of concurrent workers
+    None,
+    |msg| async move {
+        let task: Task = msg.payload;
+        println!("Processing: {}", task.action);
+        Ok(())
+    }
+).await?;
+```
+
+## Message persistence
+
+All messages published through Broccoli are marked as persistent (delivery mode 2):
+
+```rust
+// Messages survive RabbitMQ server restarts
+queue.publish("tasks", None, task, None).await?;
+```
+
+## Exchange configuration
+
+Broccoli automatically creates a `broccoli` exchange with the following settings:
+
+- **Type**: Direct exchange
+- **Durable**: Yes
+- **Auto-delete**: No
+
+Queues are bound to this exchange with routing keys matching the queue name.
+
+## Error handling
+
+Handle message processing errors with custom handlers:
+
+```rust
+queue.process_messages_with_handlers(
+    "tasks",
+    Some(4),
+    None,
+    |msg| async move {
+        // Process message
+        let task: Task = msg.payload;
+        process_task(task).await
+    },
+    |msg, _result| async move {
+        // Success handler
+        println!("Successfully processed message {}", msg.task_id);
+        Ok(())
+    },
+    |msg, error| async move {
+        // Error handler
+        eprintln!("Failed to process {}: {:?}", msg.task_id, error);
+        Ok(())
+    }
+).await?;
+```
+
+## Failed messages
+
+Messages that fail processing are rejected and requeued up to the retry limit:
+
+```rust
+let queue = BroccoliQueue::builder("amqp://localhost:5672")
+    .retry_attempts(3)    // Retry 3 times before giving up
+    .retry_failed(true)
+    .build()
+    .await?;
+```
+
+After exceeding retry attempts, messages are no longer requeued. The error handler is called for final processing.
+
+## Channel management
+
+Broccoli manages RabbitMQ channels internally:
+
+- Each publish operation creates a temporary channel
+- Consumer channels are cached in `DashMap` for acknowledgments
+- Channels are automatically cleaned up after acknowledgment
+
+## Limitations
+
+<Warning>
+  - The `cancel` operation is not implemented for RabbitMQ
+  - The `size` operation is not implemented for RabbitMQ
+  - Fairness queues (disambiguators) are not supported
+  - Scheduled messages require the RabbitMQ delayed message exchange plugin
+</Warning>
+
+## RabbitMQ plugins
+
+For delayed messages, enable the delayed message exchange plugin:
+
+```bash
+rabbitmq-plugins enable rabbitmq_delayed_message_exchange
+```
+
+## Clustering
+
+RabbitMQ clustering is supported through standard AMQP connection strings:
+
+```rust
+// Connect to a RabbitMQ cluster node
+let queue = BroccoliQueue::builder("amqp://node1.cluster:5672")
+    .build()
+    .await?;
+```
+
+Configure queue mirroring and HA policies through RabbitMQ management tools.
+
+## Management API
+
+<Warning>
+  The RabbitMQ broker does not currently support the management API features (`size`, `cancel`). Use RabbitMQ's native management tools instead.
+</Warning>
+
+## Performance considerations
+
+- **Connection pooling**: Adjust `pool_connections` based on concurrency needs
+- **Prefetch count**: RabbitMQ defaults apply; configure through RabbitMQ server settings
+- **Message persistence**: Durable messages have higher latency but ensure reliability
+- **Clustering**: Use RabbitMQ clustering for high availability
+
+## Comparison with Redis
+
+| Feature | RabbitMQ | Redis |
+|---------|----------|-------|
+| Persistence | Native durable messages | Requires AOF/RDB |
+| Clustering | Native clustering | Redis Cluster |
+| Priority queues | Native support | Sorted set implementation |
+| Fairness queues | Not supported | Supported |
+| Message routing | Advanced (exchanges) | Simple |
+| Management API | Limited | Full support |
+
+## Next steps
+
+<CardGroup cols={2}>
+
+<Card title="Redis broker" icon="bolt" href="/brokers/redis">
+  Use Redis for high-performance simple queuing
+</Card>
+
+<Card title="SurrealDB broker" icon="database" href="/brokers/surrealdb">
+  Use SurrealDB for integrated storage and queuing
+</Card>
+
+</CardGroup>
